@@ -62,6 +62,7 @@ The initial sync between the gui values, the core radio values, settings, et al 
 #include <time.h>
 #include "cessb.h"
 #include "freq_keypad.h"
+#include "deepfilter_anr.h"
 extern int get_rx_gain(void);
 extern int calculate_s_meter(struct rx *r, double rx_gain);
 extern struct rx *rx_list;
@@ -1249,6 +1250,8 @@ struct field main_controls[] = {
 	 "", 0, 100, 1, 0},
 	{"#deepfilter_pf", do_anr_edit, 1000, -1000, 40, 40, "DFPF", 80, "0", FIELD_NUMBER, STYLE_FIELD_VALUE,
 	 "", 0, 50, 1, 0},
+	{"#deepfilter_model", do_dropdown, 1000, -1000, 40, 40, "DFMODEL", 80, "DF3-LL", FIELD_DROPDOWN, STYLE_FIELD_VALUE,
+	 "DF3-LL/DF3/DF2-LL/DF2", 0, 0, 0, 0},
 
 	// APF (Audio Peak Filter) Controls
 	{"#apf_plugin", do_toggle_option, 1000, -1000, 40, 40, "APF", 40, "OFF", FIELD_TOGGLE, STYLE_FIELD_VALUE,
@@ -4884,8 +4887,16 @@ void menu_display(int show) {
 				field_move("BFO", SC(470), screen_height - SC(40), SC(45), SC(37));
 				field_move("CESSB", SC(535), screen_height - SC(40), SC(45), SC(37));
 				// VFOLK moved to menu2
-				field_move("TNPWR", SC(600), screen_height - SC(40), SC(45), SC(37));
-				field_move("SWRSTEP", SC(650), screen_height - SC(40), SC(55), SC(37));
+				field_move("ANRALG", SC(600), screen_height - SC(40), SC(50), SC(37));
+				if (!strcmp(field_str("ANRALG"), "DEEPFILTER")) {
+					field_move("DFMODEL", SC(650), screen_height - SC(40), SC(50), SC(37));
+					field_move("DFATTEN", SC(700), screen_height - SC(40), SC(50), SC(37));
+					field_move("DFPF", SC(750), screen_height - SC(40), SC(45), SC(37));
+				} else {
+					field_move("DFMODEL", 1000, -1000, SC(50), SC(37));
+					field_move("DFATTEN", 1000, -1000, SC(50), SC(37));
+					field_move("DFPF", 1000, -1000, SC(45), SC(37));
+				}
 			}
 
 			else {
@@ -8272,11 +8283,31 @@ int do_anr_edit(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
 {
 	struct field *atten_field = get_field("#deepfilter_atten");
 	struct field *pf_field = get_field("#deepfilter_pf");
+	struct field *model_field = get_field("#deepfilter_model");
+	static char last_model_path[DEEPFILTER_MODEL_PATH_MAX];
+	const char *model_path = "ext/DeepFilterNet/models/DeepFilterNet3_ll_onnx.tar.gz";
 
 	if (atten_field)
 		deepfilter_atten_lim = atoi(atten_field->value);
 	if (pf_field)
 		deepfilter_pf_beta = atoi(pf_field->value);
+	if (model_field) {
+		if (!strcmp(model_field->value, "DF3"))
+			model_path = "ext/DeepFilterNet/models/DeepFilterNet3_onnx.tar.gz";
+		else if (!strcmp(model_field->value, "DF2-LL"))
+			model_path = "ext/DeepFilterNet/models/DeepFilterNet2_onnx_ll.tar.gz";
+		else if (!strcmp(model_field->value, "DF2"))
+			model_path = "ext/DeepFilterNet/models/DeepFilterNet2_onnx.tar.gz";
+	}
+	if (strcmp(model_path, deepfilter_model_path)) {
+		snprintf(deepfilter_model_path, DEEPFILTER_MODEL_PATH_MAX, "%s", model_path);
+		if (strcmp(last_model_path, deepfilter_model_path)) {
+			deepfilter_anr_reset();
+			snprintf(last_model_path, sizeof(last_model_path), "%s", deepfilter_model_path);
+		}
+	}
+	if (!strcmp(field_str("MENU"), "1"))
+		menu_display(1);
 
 	return 0;
 }
@@ -11898,6 +11929,19 @@ else if (!strcasecmp(exec, "decode"))
 		}
 		anr_enabled = !strcmp(field_str("ANR"), "ON");
 		do_anr_edit(NULL, NULL, FIELD_EDIT, 0, 0, 0);
+	}
+	else if (!strcasecmp(exec, "dfmodel"))
+	{
+		struct field *f = get_field_by_label("DFMODEL");
+		if (f) {
+			for (char *p = args; *p; p++) *p = toupper(*p);
+			if (set_field(f->cmd, args)) {
+				write_console(STYLE_LOG, "Invalid setting:");
+				printf("Invalid setting: %s=%s\n", f->cmd, args);
+			} else {
+				do_anr_edit(NULL, NULL, FIELD_EDIT, 0, 0, 0);
+			}
+		}
 	}
 	else if( strstr("80M60M40M30M20M17M15M12M10M", exec) != NULL ||
 		     strstr("80m60m40m30m20m17m15m12m10m", exec) != NULL){

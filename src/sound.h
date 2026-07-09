@@ -49,6 +49,8 @@ enum anr_algorithm {
 extern int anr_algorithm;
 extern int deepfilter_atten_lim;
 extern int deepfilter_pf_beta;
+#define DEEPFILTER_MODEL_PATH_MAX 256
+extern char deepfilter_model_path[DEEPFILTER_MODEL_PATH_MAX];
 
 //rx DSP tool
 extern int dsp_enabled;

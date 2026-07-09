@@ -63,8 +63,14 @@ if command -v cargo >/dev/null 2>&1; then
 	fi
 	echo "Building DeepFilterNet C API"
 	cargo build --manifest-path "$DEEPFILTERNET_DIR/libDF/Cargo.toml" --release --features capi --no-default-features
+	if [ ! -f "$DEEPFILTERNET_DIR/target/release/libdf.so" ]; then
+		echo "DeepFilterNet build did not produce $DEEPFILTERNET_DIR/target/release/libdf.so"
+		exit 1
+	fi
 else
-	echo "cargo not found; install Rust/cargo to build DeepFilterNet support"
+	echo "cargo not found; install Rust/cargo before running ./build sbitx"
+	echo "On Raspberry Pi OS/Debian, try: sudo apt-get install -y cargo"
+	exit 1
 fi
 
 if test -f "data/sbitx.db"; then

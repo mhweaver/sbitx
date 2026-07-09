@@ -38,14 +38,6 @@ static int df_reported_missing;
 static int last_atten_lim = -1;
 static int last_pf_beta = -1;
 
-static const char *deepfilter_model_path(void)
-{
-	const char *path = getenv("SBITX_DEEPFILTER_MODEL");
-	if (path && path[0])
-		return path;
-	return "ext/DeepFilterNet/models/DeepFilterNet3_ll_onnx.tar.gz";
-}
-
 static int load_symbol(void **target, const char *name)
 {
 	*target = dlsym(df_lib, name);
@@ -97,9 +89,9 @@ static int deepfilter_anr_init(void)
 		}
 	}
 
-	df_state = p_df_create(deepfilter_model_path(), (float)deepfilter_atten_lim);
+	df_state = p_df_create(deepfilter_model_path, (float)deepfilter_atten_lim);
 	if (!df_state) {
-		fprintf(stderr, "DeepFilterNet: could not create model from %s\n", deepfilter_model_path());
+		fprintf(stderr, "DeepFilterNet: could not create model from %s\n", deepfilter_model_path);
 		return 0;
 	}
 

@@ -243,6 +243,7 @@ int anr_enabled = 0;		   // anr W2JON
 int anr_algorithm = ANR_ALGORITHM_WIENER;
 int deepfilter_atten_lim = 60;
 int deepfilter_pf_beta = 0; // stored as beta * 1000
+char deepfilter_model_path[DEEPFILTER_MODEL_PATH_MAX] = "ext/DeepFilterNet/models/DeepFilterNet3_ll_onnx.tar.gz";
 int notch_enabled = 0;		   // notch filter W2JON
 double notch_freq = 0;		   // Notch frequency in Hz W2JON
 double notch_bandwidth = 0;	   // Notch bandwidth in Hz W2JON
