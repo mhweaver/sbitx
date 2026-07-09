@@ -61,6 +61,7 @@ if command -v cargo >/dev/null 2>&1; then
 	if ! grep -q "crate-type" "$DEEPFILTERNET_DIR/libDF/Cargo.toml"; then
 		perl -0pi -e 's/\[lib\]\s+name = "df"\s+path = "src\/lib.rs"/[lib]\nname = "df"\npath = "src\/lib.rs"\ncrate-type = ["cdylib", "rlib"]/s' "$DEEPFILTERNET_DIR/libDF/Cargo.toml"
 	fi
+	cargo update --manifest-path "$DEEPFILTERNET_DIR/libDF/Cargo.toml" -p time --precise 0.3.35
 	echo "Building DeepFilterNet C API"
 	cargo build --manifest-path "$DEEPFILTERNET_DIR/libDF/Cargo.toml" --release --features capi --no-default-features
 	if [ ! -f "$DEEPFILTERNET_DIR/target/release/libdf.so" ]; then
