@@ -49,6 +49,15 @@ extern int noise_threshold;
 extern int noise_update_interval; 
 double scaleNoiseThreshold(int control);
 
+#define DSP_FILTER_ORDER_LEN 3
+enum dsp_filter_stage {
+	DSP_FILTER_NOTCH = 0,
+	DSP_FILTER_SPECTRAL,
+	DSP_FILTER_ANR
+};
+extern int dsp_filter_order[DSP_FILTER_ORDER_LEN];
+int dsp_set_filter_order(int first, int second, int third);
+
 // Aduio Compression tool
 extern int compression_control_level;
 void apply_fixed_compression(float *input, int num_samples, int compression_control_value);

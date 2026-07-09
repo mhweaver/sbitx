@@ -884,6 +884,7 @@ int do_eqg(struct field *f, cairo_t *gfx, int event, int a, int b, int c);
 int do_eqb(struct field *f, cairo_t *gfx, int event, int a, int b, int c);
 int do_eq_edit(struct field *f, cairo_t *gfx, int event, int a, int b, int c);
 int do_notch_edit(struct field *f, cairo_t *gfx, int event, int a, int b, int c);
+int do_dsp_order_edit(struct field *f, cairo_t *gfx, int event, int a, int b, int c);
 int do_apf_edit(struct field *f, cairo_t *gfx, int event, int a, int b, int c);
 int do_comp_edit(struct field *f, cairo_t *gfx, int event, int a, int b, int c);
 int do_txmon_edit(struct field *f, cairo_t *gfx, int event, int a, int b, int c);
@@ -1242,6 +1243,8 @@ struct field main_controls[] = {
 	// ANR Control
 	{"#anr_plugin", do_toggle_option, 1000, -1000, 40, 40, "ANR", 40, "OFF", FIELD_TOGGLE, STYLE_FIELD_VALUE,
 	 "ON/OFF", 0, 0, 0, 0},
+	{"#dsp_order", do_dsp_order_edit, 1000, -1000, 40, 40, "ORDER", 80, "N-D-A", FIELD_DROPDOWN, STYLE_FIELD_VALUE,
+	 "N-D-A/N-A-D/D-N-A/D-A-N/A-N-D/A-D-N", 0, 0, 0, 0},
 
 	// APF (Audio Peak Filter) Controls
 	{"#apf_plugin", do_toggle_option, 1000, -1000, 40, 40, "APF", 40, "OFF", FIELD_TOGGLE, STYLE_FIELD_VALUE,
@@ -4855,30 +4858,33 @@ void menu_display(int show) {
 				// Move each control to the appropriate position, grouped by line and ordered left to right
 				// Line 1
 				field_move("SET", SC(5), screen_height - SC(80), SC(45), SC(37));
-				field_move("TXEQ", SC(70), screen_height - SC(80), SC(45), SC(37));
-				field_move("RXEQ", SC(120), screen_height - SC(80), SC(45), SC(37));
-				field_move("NOTCH", SC(185), screen_height - SC(80), SC(95), SC(37));
-				field_move("ANR", SC(295), screen_height - SC(80), SC(45), SC(37));
-				field_move("APF", SC(355), screen_height - SC(80), SC(95), SC(37));
-				field_move("COMP", SC(470), screen_height - SC(80), SC(45), SC(37));
-				field_move("TXMON", SC(535), screen_height - SC(80), SC(45), SC(37));
-				field_move("TNDUR", SC(600), screen_height - SC(80), SC(45), SC(37));
-				field_move("SWRSWP", SC(650), screen_height - SC(80), SC(55), SC(37));
+				field_move("TXEQ", SC(55), screen_height - SC(80), SC(45), SC(37));
+				field_move("RXEQ", SC(105), screen_height - SC(80), SC(45), SC(37));
+				field_move("NOTCH", SC(155), screen_height - SC(80), SC(55), SC(37));
+				field_move("NFREQ", SC(215), screen_height - SC(80), SC(50), SC(37));
+				field_move("BNDWTH", SC(270), screen_height - SC(80), SC(55), SC(37));
+				field_move("DSP", SC(330), screen_height - SC(80), SC(45), SC(37));
+				field_move("INTVL", SC(380), screen_height - SC(80), SC(50), SC(37));
+				field_move("THSHLD", SC(435), screen_height - SC(80), SC(55), SC(37));
+				field_move("ANR", SC(495), screen_height - SC(80), SC(45), SC(37));
+				field_move("ORDER", SC(545), screen_height - SC(80), SC(65), SC(37));
+				field_move("APF", SC(620), screen_height - SC(80), SC(55), SC(37));
+				field_move("COMP", SC(680), screen_height - SC(80), SC(45), SC(37));
+				field_move("TXMON", SC(730), screen_height - SC(80), SC(45), SC(37));
 				// ePTT moved to menu2
 
 				// Line 2
 				field_move("WEB", SC(5), screen_height - SC(40), SC(45), SC(37));
 				field_move("EQSET", SC(70), screen_height - SC(40), SC(95), SC(37));
-				field_move("NFREQ", SC(185), screen_height - SC(40), SC(45), SC(37));
-				field_move("BNDWTH", SC(235), screen_height - SC(40), SC(45), SC(37));
-				field_move("DSP", SC(295), screen_height - SC(40), SC(45), SC(37));
-				field_move("GAIN", SC(355), screen_height - SC(40), SC(45), SC(37));
-				field_move("WIDTH", SC(405), screen_height - SC(40), SC(45), SC(37));
-				field_move("BFO", SC(470), screen_height - SC(40), SC(45), SC(37));
-				field_move("CESSB", SC(535), screen_height - SC(40), SC(45), SC(37));
+				field_move("GAIN", SC(185), screen_height - SC(40), SC(45), SC(37));
+				field_move("WIDTH", SC(235), screen_height - SC(40), SC(45), SC(37));
+				field_move("BFO", SC(295), screen_height - SC(40), SC(45), SC(37));
+				field_move("CESSB", SC(355), screen_height - SC(40), SC(50), SC(37));
+				field_move("TNDUR", SC(415), screen_height - SC(40), SC(45), SC(37));
+				field_move("SWRSWP", SC(470), screen_height - SC(40), SC(55), SC(37));
 				// VFOLK moved to menu2
-				field_move("TNPWR", SC(600), screen_height - SC(40), SC(45), SC(37));
-				field_move("SWRSTEP", SC(650), screen_height - SC(40), SC(55), SC(37));
+				field_move("TNPWR", SC(535), screen_height - SC(40), SC(45), SC(37));
+				field_move("SWRSTEP", SC(590), screen_height - SC(40), SC(55), SC(37));
 			}
 
 			else {
@@ -8119,6 +8125,48 @@ int do_notch_edit(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
 	return 0;
 }
 
+static int dsp_stage_from_order_char(char ch)
+{
+	switch (toupper((unsigned char)ch))
+	{
+	case 'N':
+		return DSP_FILTER_NOTCH;
+	case 'D':
+		return DSP_FILTER_SPECTRAL;
+	case 'A':
+		return DSP_FILTER_ANR;
+	default:
+		return -1;
+	}
+}
+
+int do_dsp_order_edit(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
+{
+	int result = 0;
+	int order[DSP_FILTER_ORDER_LEN];
+	int order_len = 0;
+	const char *value;
+
+	if (f)
+		result = do_dropdown(f, gfx, event, a, b, c);
+
+	value = field_str("ORDER");
+	if (!value)
+		return result;
+
+	for (const char *p = value; *p && order_len < DSP_FILTER_ORDER_LEN; p++)
+	{
+		int stage = dsp_stage_from_order_char(*p);
+		if (stage >= 0)
+			order[order_len++] = stage;
+	}
+
+	if (order_len == DSP_FILTER_ORDER_LEN)
+		dsp_set_filter_order(order[0], order[1], order[2]);
+
+	return result;
+}
+
 int do_apf_edit(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
 {
 	if (!strcmp(field_str("APF"), "ON"))
@@ -8373,6 +8421,7 @@ gboolean check_plugin_controls(gpointer data)
 	struct field *notch_stat = get_field("#notch_plugin");
 	struct field *apf_stat = get_field("#apf_plugin");
 	struct field *dsp_stat = get_field("#dsp_plugin");
+	struct field *dsp_order = get_field("#dsp_order");
 	struct field *anr_stat = get_field("#anr_plugin");
 	struct field *eptt_stat = get_field("#eptt");
 	struct field *vfo_stat = get_field("#vfo_lock");
@@ -8461,6 +8510,10 @@ gboolean check_plugin_controls(gpointer data)
     } else if (!strcmp(dsp_stat->value, "OFF")) {
       dsp_enabled = 0;
     }
+  }
+
+  if (dsp_order) {
+    do_dsp_order_edit(NULL, NULL, FIELD_EDIT, 0, 0, 0);
   }
   
   if (anr_stat) {
@@ -12153,6 +12206,7 @@ int main(int argc, char *argv[])
 	 * sound_thread_start().  On the very first run (no USB keys in the
 	 * INI) it auto-detects USB hardware and saves the result.
 	 */
+	do_dsp_order_edit(NULL, NULL, FIELD_EDIT, 0, 0, 0);
 	sound_start_with_usb();
 	sleep(1); /* allow audio threads to settle before gtk_main() */
 

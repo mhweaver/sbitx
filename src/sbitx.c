@@ -242,6 +242,11 @@ int anr_enabled = 0;		   // anr W2JON
 int notch_enabled = 0;		   // notch filter W2JON
 double notch_freq = 0;		   // Notch frequency in Hz W2JON
 double notch_bandwidth = 0;	   // Notch bandwidth in Hz W2JON
+int dsp_filter_order[DSP_FILTER_ORDER_LEN] = {
+	DSP_FILTER_NOTCH,
+	DSP_FILTER_SPECTRAL,
+	DSP_FILTER_ANR
+};
 int compression_control_level; // Audio Compression level W2JON
 int txmon_control_level;	   // TX Monitor level W2JON
 float vmax=0.0;   // vu meter
@@ -1388,6 +1393,120 @@ int calculate_zero_beat(struct rx *r, double sampling_rate) {
     return result;
 }
 
+int dsp_set_filter_order(int first, int second, int third)
+{
+  int next[DSP_FILTER_ORDER_LEN] = {first, second, third};
+  int seen[DSP_FILTER_ORDER_LEN] = {0};
+
+  for (int i = 0; i < DSP_FILTER_ORDER_LEN; i++) {
+    if (next[i] < 0 || next[i] >= DSP_FILTER_ORDER_LEN || seen[next[i]])
+      return -1;
+    seen[next[i]] = 1;
+  }
+
+  for (int i = 0; i < DSP_FILTER_ORDER_LEN; i++)
+    dsp_filter_order[i] = next[i];
+
+  return 0;
+}
+
+struct dsp_filter_context {
+  double sampling_rate;
+  double *noise_est;
+  double *signal_est;
+  int *noise_est_initialized;
+  int *noise_update_counter;
+  int noise_est_updated;
+};
+
+static void dsp_update_noise_estimate(struct rx *r, struct dsp_filter_context *ctx)
+{
+  if (ctx->noise_est_updated)
+    return;
+
+  if (!*ctx->noise_est_initialized || *ctx->noise_update_counter >= noise_update_interval) {
+    for (int i = 0; i < MAX_BINS; i++) {
+      double current_magnitude = cabs(r->fft_freq[i]);
+      double dynamic_alpha = (current_magnitude > ctx->noise_est[i]) ? 0.95 : 0.75;
+      ctx->noise_est[i] = dynamic_alpha * ctx->noise_est[i] + (1 - dynamic_alpha) * current_magnitude;
+      ctx->noise_est[i] = fmax(1e-6, ctx->noise_est[i]);
+    }
+    *ctx->noise_update_counter = 0;
+    *ctx->noise_est_initialized = 1;
+  } else {
+    (*ctx->noise_update_counter)++;
+  }
+
+  ctx->noise_est_updated = 1;
+}
+
+static void dsp_apply_notch_filter(struct rx *r, double sampling_rate)
+{
+  int notch_center_bin = -1;
+
+  if (r->mode == MODE_USB || r->mode == MODE_CW)
+    notch_center_bin = (int)(notch_freq / (sampling_rate / MAX_BINS));
+  else if (r->mode == MODE_LSB || r->mode == MODE_CWR)
+    notch_center_bin = MAX_BINS - (int)(notch_freq / (sampling_rate / MAX_BINS));
+  else
+    return;
+
+  int notch_bin_range = (int)(notch_bandwidth / (sampling_rate / MAX_BINS));
+  if (notch_bin_range < 1)
+    notch_bin_range = 1;
+
+  for (int i = notch_center_bin - notch_bin_range / 2;
+       i <= notch_center_bin + notch_bin_range / 2; i++) {
+    if (i >= 0 && i < MAX_BINS)
+      r->fft_freq[i] *= 0.001;
+  }
+}
+
+static void dsp_apply_spectral_filter(struct rx *r, struct dsp_filter_context *ctx)
+{
+  static double previous_magnitude[MAX_BINS] = {0};
+
+  dsp_update_noise_estimate(r, ctx);
+
+  for (int i = 0; i < MAX_BINS; i++) {
+    double magnitude = cabs(r->fft_freq[i]);
+    double phase = carg(r->fft_freq[i]);
+    double noise_magnitude = ctx->noise_est[i];
+    double snr = magnitude / (noise_magnitude + 1e-6);
+    double reduction_factor = 1.0 / (1.0 + exp(-5.0 * (snr - 0.5)));
+    double noise_residual = 0.10;
+    double new_magnitude =
+        fmax(noise_residual * noise_magnitude, magnitude - reduction_factor * noise_magnitude);
+
+    new_magnitude = 0.9 * new_magnitude + 0.1 * previous_magnitude[i];
+    previous_magnitude[i] = new_magnitude;
+    r->fft_freq[i] = new_magnitude * cexp(I * phase);
+  }
+}
+
+static void dsp_apply_anr_filter(struct rx *r, struct dsp_filter_context *ctx)
+{
+  dsp_update_noise_estimate(r, ctx);
+
+  for (int i = 0; i < MAX_BINS; i++) {
+    double current_magnitude = cabs(r->fft_freq[i]);
+    ctx->signal_est[i] = SIGNAL_ALPHA * ctx->signal_est[i] + (1 - SIGNAL_ALPHA) * current_magnitude;
+  }
+
+  for (int i = 0; i < MAX_BINS; i++) {
+    double signal_power = fmax(1e-6, ctx->signal_est[i] * ctx->signal_est[i]);
+    double noise_power = fmax(1e-6, ctx->noise_est[i] * ctx->noise_est[i]);
+    double wiener_filter = (signal_power + 0.2 * noise_power) / (signal_power + noise_power);
+    wiener_filter = fmax(0.2, wiener_filter);
+
+    r->fft_freq[i] *= wiener_filter;
+  }
+
+  for (int i = 1; i < MAX_BINS - 1; i++) {
+    r->fft_freq[i] =
+        (0.8 * r->fft_freq[i]) + (0.1 * r->fft_freq[i - 1]) + (0.1 * r->fft_freq[i + 1]);
+  }
+}
 
 // RX processing pipeline
 void rx_linear(const double *iq_i, const double *iq_q, int32_t *output_speaker, int32_t *output_tx,
@@ -1461,7 +1580,7 @@ void rx_linear(const double *iq_i, const double *iq_q, int32_t *output_speaker, 
     rx_eq_initialized = 1;
   }
 
-  // Per-bin DSP: noise estimation, spectral subtraction, Wiener ANR, notch
+  // Per-bin DSP: reorderable notch, spectral subtraction, and Wiener ANR
   // Skipped for digital modes which work on the raw spectrum.
   if (r->mode != MODE_DIGITAL && r->mode != MODE_FT8 && r->mode != MODE_FT4 &&
       r->mode != MODE_2TONE) {
@@ -1470,100 +1589,31 @@ void rx_linear(const double *iq_i, const double *iq_q, int32_t *output_speaker, 
     static double signal_est[MAX_BINS] = {0}; // For Wiener filter
     static int noise_est_initialized = 0;
     static int noise_update_counter = 0;
-    // Scale the noise_threshold value
-    double scaled_noise_threshold = scaleNoiseThreshold(noise_threshold * 1.2);
+    struct dsp_filter_context dsp_ctx = {
+      .sampling_rate = sampling_rate,
+      .noise_est = noise_est,
+      .signal_est = signal_est,
+      .noise_est_initialized = &noise_est_initialized,
+      .noise_update_counter = &noise_update_counter,
+      .noise_est_updated = 0
+    };
 
-    // Notch filter
-    if (notch_enabled) {
-      int notch_center_bin, notch_bin_range;
-
-      if (r->mode == MODE_USB || r->mode == MODE_CW) {
-        notch_center_bin = (int)(notch_freq / (sampling_rate / MAX_BINS));
-      } else if (r->mode == MODE_LSB || r->mode == MODE_CWR) {
-        notch_center_bin = MAX_BINS - (int)(notch_freq / (sampling_rate / MAX_BINS));
-      }
-      notch_bin_range = (int)(notch_bandwidth / (sampling_rate / MAX_BINS));
-
-      for (i = notch_center_bin - notch_bin_range / 2; i <= notch_center_bin + notch_bin_range / 2;
-           i++) {
-        if (i >= 0 && i < MAX_BINS) {
-          r->fft_freq[i] *= 0.001; // Attenuate magnitude
-        }
-      }
-    }
-
-    // Noise Estimation, ANR, DSP mods by W4WHL
-    if (!noise_est_initialized || noise_update_counter >= noise_update_interval) {
-      for (i = 0; i < MAX_BINS; i++) {
-        double current_magnitude = cabs(r->fft_freq[i]);
-
-        // Dynamically adjust noise estimation rate vs fixed
-        double dynamic_alpha = (current_magnitude > noise_est[i]) ? 0.95 : 0.75;
-        noise_est[i] = dynamic_alpha * noise_est[i] + (1 - dynamic_alpha) * current_magnitude;
-
-        // Enforce a noise floor
-        noise_est[i] = fmax(1e-6, noise_est[i]);
-      }
-      noise_update_counter = 0;
-      noise_est_initialized = 1;
-    } else {
-      noise_update_counter++;
-    }
-
-    if (dsp_enabled) {
-      // Spectral subtraction filter
-      for (i = 0; i < MAX_BINS; i++) {
-        double magnitude = cabs(r->fft_freq[i]);
-        double phase = carg(r->fft_freq[i]);
-        double noise_magnitude = noise_est[i];
-
-        // Calculate the SNR
-        double snr = magnitude / (noise_magnitude + 1e-6); // Avoid division by zero
-        double new_magnitude;
-
-        // Sigmoid-based reduction factor
-        double reduction_factor =
-            1.0 / (1.0 + exp(-5.0 * (snr - 0.5))); // Sharp and low-midpoint curve
-
-        // Calculate new magnitude with residual noise preservation
-        double noise_residual = 0.10; // Retain 10% of noise, reduces
-        new_magnitude =
-            fmax(noise_residual * noise_magnitude, magnitude - reduction_factor * noise_magnitude);
-
-        // Smoother bin-to-bin transitions (blend current and adjacent bins)
-        static double previous_magnitude[MAX_BINS] = {0};
-        new_magnitude =
-            0.9 * new_magnitude + 0.1 * previous_magnitude[i]; // Stronger weight on current bin
-        previous_magnitude[i] = new_magnitude;
-
-        // Reconstruct the frequency domain signal
-        r->fft_freq[i] = new_magnitude * cexp(I * phase);
-      }
-    }
-
-    if (anr_enabled) {
-      // Signal estimation for Wiener filter
-      for (i = 0; i < MAX_BINS; i++) {
-        double current_magnitude = cabs(r->fft_freq[i]);
-        signal_est[i] = SIGNAL_ALPHA * signal_est[i] + (1 - SIGNAL_ALPHA) * current_magnitude;
-      }
-
-      // Wiener filter
-      for (i = 0; i < MAX_BINS; i++) {
-        double signal_power = fmax(1e-6, signal_est[i] * signal_est[i]);
-        double noise_power = fmax(1e-6, noise_est[i] * noise_est[i]);
-
-        // Relaxed Wiener filter gain
-        double wiener_filter = (signal_power + 0.2 * noise_power) / (signal_power + noise_power);
-        wiener_filter = fmax(0.2, wiener_filter); // Minimum gain to preserve quiet signals
-
-        r->fft_freq[i] *= wiener_filter;
-      }
-
-      // Bin smoothing
-      for (i = 1; i < MAX_BINS - 1; i++) {
-        r->fft_freq[i] =
-            (0.8 * r->fft_freq[i]) + (0.1 * r->fft_freq[i - 1]) + (0.1 * r->fft_freq[i + 1]);
+    for (i = 0; i < DSP_FILTER_ORDER_LEN; i++) {
+      switch (dsp_filter_order[i]) {
+      case DSP_FILTER_NOTCH:
+        if (notch_enabled)
+          dsp_apply_notch_filter(r, dsp_ctx.sampling_rate);
+        break;
+      case DSP_FILTER_SPECTRAL:
+        if (dsp_enabled)
+          dsp_apply_spectral_filter(r, &dsp_ctx);
+        break;
+      case DSP_FILTER_ANR:
+        if (anr_enabled)
+          dsp_apply_anr_filter(r, &dsp_ctx);
+        break;
+      default:
+        break;
       }
     }
   }
