@@ -1399,6 +1399,7 @@ void rx_linear(const double *iq_i, const double *iq_q, int32_t *output_speaker, 
                int n_samples) {
   int i;
   struct rx *r = rx_list;
+  double anr_post_agc_gain = 1.0;
 
   //////////////////////////////////////////////////
   // Input framing
@@ -1554,6 +1555,8 @@ void rx_linear(const double *iq_i, const double *iq_q, int32_t *output_speaker, 
       }
 
       // Wiener filter
+      double wiener_gain_sum = 0.0;
+      int wiener_gain_count = 0;
       for (i = 0; i < MAX_BINS; i++) {
         double signal_power = fmax(1e-6, signal_est[i] * signal_est[i]);
         double noise_power = fmax(1e-6, noise_est[i] * noise_est[i]);
@@ -1563,7 +1566,11 @@ void rx_linear(const double *iq_i, const double *iq_q, int32_t *output_speaker, 
         wiener_filter = fmax(0.2, wiener_filter); // Minimum gain to preserve quiet signals
 
         r->fft_freq[i] *= wiener_filter;
+        wiener_gain_sum += wiener_filter;
+        wiener_gain_count++;
       }
+      if (wiener_gain_count > 0)
+        anr_post_agc_gain = wiener_gain_sum / wiener_gain_count;
 
       // Bin smoothing
       for (i = 1; i < MAX_BINS - 1; i++) {
@@ -1778,6 +1785,11 @@ void rx_linear(const double *iq_i, const double *iq_q, int32_t *output_speaker, 
   if (mute_count) {
     memset(output_speaker, 0, MAX_BINS / 2 * sizeof(int32_t));
     mute_count--;
+  }
+
+  if (anr_enabled && anr_algorithm == ANR_ALGORITHM_WIENER && anr_post_agc_gain < 1.0) {
+    for (i = 0; i < MAX_BINS / 2; i++)
+      output_speaker[i] = (int32_t)(output_speaker[i] * anr_post_agc_gain);
   }
 
   if (anr_enabled && anr_algorithm == ANR_ALGORITHM_DEEPFILTER &&

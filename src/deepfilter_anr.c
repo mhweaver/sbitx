@@ -10,6 +10,7 @@
 
 #define DF_AUDIO_SCALE 2147483648.0f
 #define DF_MAX_FRAME 4096
+#define DF_READY_CAP (DF_MAX_FRAME * 4)
 
 struct df_state;
 
@@ -32,7 +33,10 @@ static df_free_fn p_df_free;
 static size_t df_frame_len;
 static float df_in[DF_MAX_FRAME];
 static float df_out[DF_MAX_FRAME];
+static float df_ready[DF_READY_CAP];
 static int df_fill;
+static int df_ready_read;
+static int df_ready_count;
 static int df_reported_missing;
 
 static int last_atten_lim = -1;
@@ -117,6 +121,8 @@ void deepfilter_anr_reset(void)
 		df_state = NULL;
 	}
 	df_fill = 0;
+	df_ready_read = 0;
+	df_ready_count = 0;
 	last_atten_lim = -1;
 	last_pf_beta = -1;
 }
@@ -148,6 +154,27 @@ static void deepfilter_update_controls(void)
 	}
 }
 
+static void deepfilter_push_output(float sample)
+{
+	int write = (df_ready_read + df_ready_count) % DF_READY_CAP;
+	df_ready[write] = sample;
+	if (df_ready_count < DF_READY_CAP) {
+		df_ready_count++;
+	} else {
+		df_ready_read = (df_ready_read + 1) % DF_READY_CAP;
+	}
+}
+
+static int deepfilter_pop_output(float *sample)
+{
+	if (df_ready_count == 0)
+		return 0;
+	*sample = df_ready[df_ready_read];
+	df_ready_read = (df_ready_read + 1) % DF_READY_CAP;
+	df_ready_count--;
+	return 1;
+}
+
 int deepfilter_anr_process(int32_t *samples, int n_samples)
 {
 	if (!deepfilter_anr_init())
@@ -156,21 +183,21 @@ int deepfilter_anr_process(int32_t *samples, int n_samples)
 	deepfilter_update_controls();
 
 	for (int i = 0; i + 1 < n_samples; i += 2) {
-		df_in[df_fill++] = (float)samples[i] / DF_AUDIO_SCALE;
-		if ((size_t)df_fill < df_frame_len)
-			continue;
+		float input = ((float)samples[i] + (float)samples[i + 1]) / (2.0f * DF_AUDIO_SCALE);
+		float output;
 
-		p_df_process_frame(df_state, df_in, df_out);
-		df_fill = 0;
+		if (deepfilter_pop_output(&output)) {
+			int32_t s = float_to_i32(output);
+			samples[i] = s;
+			samples[i + 1] = s;
+		}
 
-		int start = i + 2 - (int)df_frame_len * 2;
-		for (size_t j = 0; j < df_frame_len; j++) {
-			int out_i = start + (int)j * 2;
-			int32_t s = float_to_i32(df_out[j]);
-			if (out_i >= 0 && out_i + 1 < n_samples) {
-				samples[out_i] = s;
-				samples[out_i + 1] = s;
-			}
+		df_in[df_fill++] = input;
+		if ((size_t)df_fill == df_frame_len) {
+			p_df_process_frame(df_state, df_in, df_out);
+			df_fill = 0;
+			for (size_t j = 0; j < df_frame_len; j++)
+				deepfilter_push_output(df_out[j]);
 		}
 	}
 
