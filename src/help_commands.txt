@@ -342,14 +342,14 @@ scroll the mouse wheel over it for fine adjustment.
   Effective on weak signals buried in noise. May slightly degrade audio quality
   depending on the selected algorithm.
 
-* ANRALG [WIENER|DEEPFILTER]
+* ANRALG [WIENER|DF]
   Selects the ANR algorithm. WIENER is the original frequency-domain filter.
-  DEEPFILTER uses DeepFilterNet on demodulated voice audio when ANR is on.
+  DF uses DeepFilterNet on demodulated voice audio when ANR is on.
 
-* DFATTEN [0-100]
+* DF_ATTEN [0-100]
   DeepFilterNet attenuation limit in dB.
 
-* DFPF [0-50]
+* DF_PF [0-50]
   DeepFilterNet post-filter beta, scaled by 1000. 0 disables the post-filter;
   50 means beta 0.05.
 

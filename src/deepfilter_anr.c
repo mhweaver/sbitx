@@ -2,16 +2,14 @@
 #include "sound.h"
 
 #include <dlfcn.h>
-#include <limits.h>
 #include <math.h>
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
 
 #define DF_AUDIO_SCALE 2147483648.0f
 #define DF_MAX_FRAME 4096
 #define DF_READY_CAP (DF_MAX_FRAME * 4)
+#define DF_LIB_PATH "ext/DeepFilterNet/target/release/libdf.so"
+#define DF_MODEL_PATH "ext/DeepFilterNet/models/DeepFilterNet3_ll_onnx.tar.gz"
 
 struct df_state;
 
@@ -43,68 +41,6 @@ static int df_reported_missing;
 static int last_atten_lim = -1;
 static int last_pf_beta = -1;
 
-static int path_is_absolute(const char *path)
-{
-	return path && path[0] == '/';
-}
-
-static int get_exe_dir(char *dir, size_t dir_size)
-{
-#ifdef __linux__
-	char exe_path[PATH_MAX];
-	ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
-	if (len <= 0)
-		return 0;
-	exe_path[len] = '\0';
-	char *slash = strrchr(exe_path, '/');
-	if (!slash)
-		return 0;
-	*slash = '\0';
-	snprintf(dir, dir_size, "%s", exe_path);
-	return 1;
-#else
-	(void)dir;
-	(void)dir_size;
-	return 0;
-#endif
-}
-
-static int make_exe_relative_path(const char *path, char *resolved, size_t resolved_size)
-{
-	char exe_dir[PATH_MAX];
-	if (path_is_absolute(path) || !get_exe_dir(exe_dir, sizeof(exe_dir)))
-		return 0;
-	snprintf(resolved, resolved_size, "%s/%s", exe_dir, path);
-	return 1;
-}
-
-static int try_dlopen(const char *path)
-{
-	char resolved[PATH_MAX];
-	if (!path || !path[0])
-		return 0;
-	df_lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
-	if (df_lib)
-		return 1;
-	if (make_exe_relative_path(path, resolved, sizeof(resolved))) {
-		df_lib = dlopen(resolved, RTLD_NOW | RTLD_LOCAL);
-		if (df_lib)
-			return 1;
-	}
-	return 0;
-}
-
-static const char *resolve_data_path(const char *path, char *resolved, size_t resolved_size)
-{
-	if (path_is_absolute(path))
-		return path;
-	if (access(path, R_OK) == 0)
-		return path;
-	if (make_exe_relative_path(path, resolved, resolved_size) && access(resolved, R_OK) == 0)
-		return resolved;
-	return path;
-}
-
 static int load_symbol(void **target, const char *name)
 {
 	*target = dlsym(df_lib, name);
@@ -117,26 +53,15 @@ static int load_symbol(void **target, const char *name)
 
 static int deepfilter_anr_init(void)
 {
-	const char *env_lib = getenv("SBITX_DEEPFILTER_LIB");
-	const char *candidates[] = {
-		"ext/DeepFilterNet/target/release/libdf.so",
-		"ext/DeepFilterNet/target/release/libdeep_filter.so",
-		"ext/DeepFilterNet/target/release/libdeepfilter.so",
-		NULL,
-	};
-
 	if (df_state)
 		return 1;
 
 	if (!df_lib) {
-		try_dlopen(env_lib);
-		for (int i = 0; candidates[i]; i++) {
-			if (try_dlopen(candidates[i]))
-				break;
-		}
+		df_lib = dlopen(DF_LIB_PATH, RTLD_NOW | RTLD_LOCAL);
 		if (!df_lib) {
 			if (!df_reported_missing) {
-				fprintf(stderr, "DeepFilterNet: shared library not found; run ./build sbitx first\n");
+				fprintf(stderr, "DeepFilterNet: %s not found; run ./build sbitx first\n",
+				        DF_LIB_PATH);
 				df_reported_missing = 1;
 			}
 			return 0;
@@ -154,12 +79,9 @@ static int deepfilter_anr_init(void)
 		}
 	}
 
-	char resolved_model_path[PATH_MAX];
-	const char *model_path = resolve_data_path(deepfilter_model_path, resolved_model_path,
-	                                           sizeof(resolved_model_path));
-	df_state = p_df_create(model_path, (float)deepfilter_atten_lim);
+	df_state = p_df_create(DF_MODEL_PATH, (float)deepfilter_atten_lim);
 	if (!df_state) {
-		fprintf(stderr, "DeepFilterNet: could not create model from %s\n", model_path);
+		fprintf(stderr, "DeepFilterNet: could not create model from %s\n", DF_MODEL_PATH);
 		return 0;
 	}
 
@@ -189,21 +111,6 @@ void deepfilter_anr_reset(void)
 	df_ready_count = 0;
 	last_atten_lim = -1;
 	last_pf_beta = -1;
-}
-
-static float clamp_float(float v, float lo, float hi)
-{
-	if (v < lo)
-		return lo;
-	if (v > hi)
-		return hi;
-	return v;
-}
-
-static int32_t float_to_i32(float v)
-{
-	v = clamp_float(v, -1.0f, 1.0f);
-	return (int32_t)(v * DF_AUDIO_SCALE);
 }
 
 static void deepfilter_update_controls(void)
@@ -251,7 +158,8 @@ int deepfilter_anr_process(int32_t *samples, int n_samples)
 		float output;
 
 		if (deepfilter_pop_output(&output)) {
-			int32_t s = float_to_i32(output);
+			double clipped = fmin(fmax((double)output, -1.0), 1.0);
+			int32_t s = (int32_t)lrint(clipped * 2147483647.0);
 			samples[i] = s;
 			samples[i + 1] = s;
 		}

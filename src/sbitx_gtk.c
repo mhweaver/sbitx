@@ -1245,10 +1245,10 @@ struct field main_controls[] = {
 	{"#anr_plugin", do_toggle_option, 1000, -1000, 40, 40, "ANR", 40, "OFF", FIELD_TOGGLE, STYLE_FIELD_VALUE,
 	 "ON/OFF", 0, 0, 0, 0},
 	{"#anr_algorithm", do_dropdown, 1000, -1000, 40, 40, "ANRALG", 80, "WIENER", FIELD_DROPDOWN, STYLE_FIELD_VALUE,
-	 "WIENER/DEEPFILTER", 0, 0, 0, 0},
-	{"#deepfilter_atten", do_anr_edit, 1000, -1000, 40, 40, "DFATTEN", 80, "60", FIELD_NUMBER, STYLE_FIELD_VALUE,
+	 "WIENER/DF", 0, 0, 0, 0},
+	{"#deepfilter_atten", do_anr_edit, 1000, -1000, 40, 40, "DF_ATTEN", 80, "60", FIELD_NUMBER, STYLE_FIELD_VALUE,
 	 "", 0, 100, 1, 0},
-	{"#deepfilter_pf", do_anr_edit, 1000, -1000, 40, 40, "DFPF", 80, "0", FIELD_NUMBER, STYLE_FIELD_VALUE,
+	{"#deepfilter_pf", do_anr_edit, 1000, -1000, 40, 40, "DF_PF", 80, "0", FIELD_NUMBER, STYLE_FIELD_VALUE,
 	 "", 0, 50, 1, 0},
 
 	// APF (Audio Peak Filter) Controls
@@ -2671,6 +2671,9 @@ static int user_settings_handler(void *user, const char *section,
 			return 1;
 		}
 		sprintf(cmd, "%s", name);
+		if (!strcmp(cmd, "#anr_algorithm") &&
+		    strcmp(new_value, "WIENER") && strcmp(new_value, "DF"))
+			strcpy(new_value, "WIENER");
 
         // Load max_vswr if present
 		if (!strcmp(name, "max_vswr"))
@@ -4886,8 +4889,8 @@ void menu_display(int show) {
 				field_move("CESSB", SC(535), screen_height - SC(40), SC(45), SC(37));
 				// VFOLK moved to menu2
 				field_move("ANRALG", 1000, -1000, SC(50), SC(37));
-				field_move("DFATTEN", 1000, -1000, SC(50), SC(37));
-				field_move("DFPF", 1000, -1000, SC(45), SC(37));
+				field_move("DF_ATTEN", 1000, -1000, SC(70), SC(37));
+				field_move("DF_PF", 1000, -1000, SC(50), SC(37));
 			}
 
 			else {
@@ -4928,12 +4931,12 @@ void menu2_display(int show) {
 		field_move("SCOPESIZE", SC(245), screen_height - SC(80), SC(70), SC(37)); // Add SCOPESIZE field
 		field_move("TXPANAFAL", SC(320), screen_height - SC(80), SC(70), SC(37)); // Add TXPANAFAL field
 		field_move("ANRALG", SC(395), screen_height - SC(80), SC(50), SC(37));
-		if (!strcmp(field_str("ANRALG"), "DEEPFILTER")) {
-			field_move("DFATTEN", SC(445), screen_height - SC(80), SC(50), SC(37));
-			field_move("DFPF", SC(495), screen_height - SC(80), SC(45), SC(37));
+		if (!strcmp(field_str("ANRALG"), "DF")) {
+			field_move("DF_ATTEN", SC(445), screen_height - SC(80), SC(70), SC(37));
+			field_move("DF_PF", SC(520), screen_height - SC(80), SC(50), SC(37));
 		} else {
-			field_move("DFATTEN", 1000, -1000, SC(50), SC(37));
-			field_move("DFPF", 1000, -1000, SC(45), SC(37));
+			field_move("DF_ATTEN", 1000, -1000, SC(70), SC(37));
+			field_move("DF_PF", 1000, -1000, SC(50), SC(37));
 		}
 		field_move("INTENSITY", SC(245), screen_height - SC(40), SC(70), SC(37)); // Add SCOPE ALPHA field
 		field_move("AUTOSCOPE", SC(320), screen_height - SC(40), SC(70), SC(37)); // Add AUTOADJUST spectrum field
@@ -8282,20 +8285,11 @@ int do_anr_edit(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
 {
 	struct field *atten_field = get_field("#deepfilter_atten");
 	struct field *pf_field = get_field("#deepfilter_pf");
-	static char last_model_path[DEEPFILTER_MODEL_PATH_MAX];
-	const char *model_path = "ext/DeepFilterNet/models/DeepFilterNet3_ll_onnx.tar.gz";
 
 	if (atten_field)
 		deepfilter_atten_lim = atoi(atten_field->value);
 	if (pf_field)
 		deepfilter_pf_beta = atoi(pf_field->value);
-	if (strcmp(model_path, deepfilter_model_path)) {
-		snprintf(deepfilter_model_path, DEEPFILTER_MODEL_PATH_MAX, "%s", model_path);
-		if (strcmp(last_model_path, deepfilter_model_path)) {
-			deepfilter_anr_reset();
-			snprintf(last_model_path, sizeof(last_model_path), "%s", deepfilter_model_path);
-		}
-	}
 	if (!strcmp(field_str("MENU"), "2"))
 		menu2_display(1);
 
@@ -8514,7 +8508,7 @@ gboolean check_plugin_controls(gpointer data)
   }
 
   if (anr_alg) {
-    if (!strcmp(anr_alg->value, "DEEPFILTER")) {
+    if (!strcmp(anr_alg->value, "DF")) {
       anr_algorithm = ANR_ALGORITHM_DEEPFILTER;
     } else {
       anr_algorithm = ANR_ALGORITHM_WIENER;
@@ -11926,7 +11920,6 @@ else if (!strcasecmp(exec, "decode"))
 	}
 	else
 	{
-		char field_name[32];
 		// conver the string to upper if not already so
 		for (char *p = exec; *p; p++)
 			*p = toupper(*p);
@@ -11936,6 +11929,8 @@ else if (!strcasecmp(exec, "decode"))
 			// convert all the letters to uppercase
 			for (char *p = args; *p; p++)
 				*p = toupper(*p);
+			if (!strcmp(exec, "ANRALG") && strcmp(args, "WIENER") && strcmp(args, "DF"))
+				strcpy(args, "WIENER");
 			if (set_field(f->cmd, args))
 			{
 				write_console(STYLE_LOG, "Invalid setting:");
@@ -11953,9 +11948,9 @@ else if (!strcasecmp(exec, "decode"))
 				focus_since = millis();
 				update_field(f_hover);
 				if (!strcmp(exec, "ANRALG")) {
-					anr_algorithm = !strcmp(f->value, "DEEPFILTER") ? ANR_ALGORITHM_DEEPFILTER : ANR_ALGORITHM_WIENER;
+					anr_algorithm = !strcmp(f->value, "DF") ? ANR_ALGORITHM_DEEPFILTER : ANR_ALGORITHM_WIENER;
 					do_anr_edit(NULL, NULL, FIELD_EDIT, 0, 0, 0);
-				} else if (!strcmp(exec, "DFATTEN") || !strcmp(exec, "DFPF")) {
+				} else if (!strcmp(exec, "DF_ATTEN") || !strcmp(exec, "DF_PF")) {
 					do_anr_edit(NULL, NULL, FIELD_EDIT, 0, 0, 0);
 				}
 			}
@@ -12215,7 +12210,7 @@ int main(int argc, char *argv[])
 		ini_parse(directory, user_settings_handler, NULL);
 	}
 
-	if (!strcmp(field_str("ANRALG"), "DEEPFILTER"))
+	if (!strcmp(field_str("ANRALG"), "DF"))
 		anr_algorithm = ANR_ALGORITHM_DEEPFILTER;
 	else
 		anr_algorithm = ANR_ALGORITHM_WIENER;

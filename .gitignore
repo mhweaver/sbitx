@@ -1,6 +1,7 @@
 audio/
 .vs/
 .vscode/
+.idea/
 data/hw_settings.ini
 data/user_settings.ini
 data/sbitx.db
@@ -19,4 +20,4 @@ docs/Wiki-Resources/Disassembly
 *.o
 data/big-cty.url
 data/cty.dat
-ext/DeepFilterNet/
+ext/
