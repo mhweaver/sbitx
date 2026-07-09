@@ -4887,16 +4887,10 @@ void menu_display(int show) {
 				field_move("BFO", SC(470), screen_height - SC(40), SC(45), SC(37));
 				field_move("CESSB", SC(535), screen_height - SC(40), SC(45), SC(37));
 				// VFOLK moved to menu2
-				field_move("ANRALG", SC(600), screen_height - SC(40), SC(50), SC(37));
-				if (!strcmp(field_str("ANRALG"), "DEEPFILTER")) {
-					field_move("DFMODEL", SC(650), screen_height - SC(40), SC(50), SC(37));
-					field_move("DFATTEN", SC(700), screen_height - SC(40), SC(50), SC(37));
-					field_move("DFPF", SC(750), screen_height - SC(40), SC(45), SC(37));
-				} else {
-					field_move("DFMODEL", 1000, -1000, SC(50), SC(37));
-					field_move("DFATTEN", 1000, -1000, SC(50), SC(37));
-					field_move("DFPF", 1000, -1000, SC(45), SC(37));
-				}
+				field_move("ANRALG", 1000, -1000, SC(50), SC(37));
+				field_move("DFMODEL", 1000, -1000, SC(50), SC(37));
+				field_move("DFATTEN", 1000, -1000, SC(50), SC(37));
+				field_move("DFPF", 1000, -1000, SC(45), SC(37));
 			}
 
 			else {
@@ -4936,6 +4930,16 @@ void menu2_display(int show) {
 		field_move("SCOPEAVG", SC(170), screen_height - SC(40), SC(70), SC(37));  // Add SCOPEAVG field
 		field_move("SCOPESIZE", SC(245), screen_height - SC(80), SC(70), SC(37)); // Add SCOPESIZE field
 		field_move("TXPANAFAL", SC(320), screen_height - SC(80), SC(70), SC(37)); // Add TXPANAFAL field
+		field_move("ANRALG", SC(395), screen_height - SC(80), SC(50), SC(37));
+		if (!strcmp(field_str("ANRALG"), "DEEPFILTER")) {
+			field_move("DFMODEL", SC(445), screen_height - SC(80), SC(50), SC(37));
+			field_move("DFATTEN", SC(495), screen_height - SC(80), SC(50), SC(37));
+			field_move("DFPF", SC(545), screen_height - SC(80), SC(45), SC(37));
+		} else {
+			field_move("DFMODEL", 1000, -1000, SC(50), SC(37));
+			field_move("DFATTEN", 1000, -1000, SC(50), SC(37));
+			field_move("DFPF", 1000, -1000, SC(45), SC(37));
+		}
 		field_move("INTENSITY", SC(245), screen_height - SC(40), SC(70), SC(37)); // Add SCOPE ALPHA field
 		field_move("AUTOSCOPE", SC(320), screen_height - SC(40), SC(70), SC(37)); // Add AUTOADJUST spectrum field
 		if (!strcmp(field_str("EPTTOPT"), "ON"))
@@ -8306,8 +8310,8 @@ int do_anr_edit(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
 			snprintf(last_model_path, sizeof(last_model_path), "%s", deepfilter_model_path);
 		}
 	}
-	if (!strcmp(field_str("MENU"), "1"))
-		menu_display(1);
+	if (!strcmp(field_str("MENU"), "2"))
+		menu2_display(1);
 
 	return 0;
 }
