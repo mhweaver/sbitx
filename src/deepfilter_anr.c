@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define DF_AUDIO_SCALE 2147483648.0f
 #define DF_MAX_FRAME 4096
@@ -42,6 +43,68 @@ static int df_reported_missing;
 static int last_atten_lim = -1;
 static int last_pf_beta = -1;
 
+static int path_is_absolute(const char *path)
+{
+	return path && path[0] == '/';
+}
+
+static int get_exe_dir(char *dir, size_t dir_size)
+{
+#ifdef __linux__
+	char exe_path[PATH_MAX];
+	ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+	if (len <= 0)
+		return 0;
+	exe_path[len] = '\0';
+	char *slash = strrchr(exe_path, '/');
+	if (!slash)
+		return 0;
+	*slash = '\0';
+	snprintf(dir, dir_size, "%s", exe_path);
+	return 1;
+#else
+	(void)dir;
+	(void)dir_size;
+	return 0;
+#endif
+}
+
+static int make_exe_relative_path(const char *path, char *resolved, size_t resolved_size)
+{
+	char exe_dir[PATH_MAX];
+	if (path_is_absolute(path) || !get_exe_dir(exe_dir, sizeof(exe_dir)))
+		return 0;
+	snprintf(resolved, resolved_size, "%s/%s", exe_dir, path);
+	return 1;
+}
+
+static int try_dlopen(const char *path)
+{
+	char resolved[PATH_MAX];
+	if (!path || !path[0])
+		return 0;
+	df_lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+	if (df_lib)
+		return 1;
+	if (make_exe_relative_path(path, resolved, sizeof(resolved))) {
+		df_lib = dlopen(resolved, RTLD_NOW | RTLD_LOCAL);
+		if (df_lib)
+			return 1;
+	}
+	return 0;
+}
+
+static const char *resolve_data_path(const char *path, char *resolved, size_t resolved_size)
+{
+	if (path_is_absolute(path))
+		return path;
+	if (access(path, R_OK) == 0)
+		return path;
+	if (make_exe_relative_path(path, resolved, resolved_size) && access(resolved, R_OK) == 0)
+		return resolved;
+	return path;
+}
+
 static int load_symbol(void **target, const char *name)
 {
 	*target = dlsym(df_lib, name);
@@ -54,8 +117,8 @@ static int load_symbol(void **target, const char *name)
 
 static int deepfilter_anr_init(void)
 {
+	const char *env_lib = getenv("SBITX_DEEPFILTER_LIB");
 	const char *candidates[] = {
-		getenv("SBITX_DEEPFILTER_LIB"),
 		"ext/DeepFilterNet/target/release/libdf.so",
 		"ext/DeepFilterNet/target/release/libdeep_filter.so",
 		"ext/DeepFilterNet/target/release/libdeepfilter.so",
@@ -66,11 +129,9 @@ static int deepfilter_anr_init(void)
 		return 1;
 
 	if (!df_lib) {
+		try_dlopen(env_lib);
 		for (int i = 0; candidates[i]; i++) {
-			if (!candidates[i][0])
-				continue;
-			df_lib = dlopen(candidates[i], RTLD_NOW | RTLD_LOCAL);
-			if (df_lib)
+			if (try_dlopen(candidates[i]))
 				break;
 		}
 		if (!df_lib) {
@@ -93,9 +154,12 @@ static int deepfilter_anr_init(void)
 		}
 	}
 
-	df_state = p_df_create(deepfilter_model_path, (float)deepfilter_atten_lim);
+	char resolved_model_path[PATH_MAX];
+	const char *model_path = resolve_data_path(deepfilter_model_path, resolved_model_path,
+	                                           sizeof(resolved_model_path));
+	df_state = p_df_create(model_path, (float)deepfilter_atten_lim);
 	if (!df_state) {
-		fprintf(stderr, "DeepFilterNet: could not create model from %s\n", deepfilter_model_path);
+		fprintf(stderr, "DeepFilterNet: could not create model from %s\n", model_path);
 		return 0;
 	}
 

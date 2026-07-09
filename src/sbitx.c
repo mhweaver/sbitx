@@ -1499,7 +1499,8 @@ void rx_linear(const double *iq_i, const double *iq_q, int32_t *output_speaker, 
     }
 
     // Noise Estimation, ANR, DSP mods by W4WHL
-    if (!noise_est_initialized || noise_update_counter >= noise_update_interval) {
+    int wiener_anr_active = anr_enabled && anr_algorithm == ANR_ALGORITHM_WIENER;
+    if (!noise_est_initialized || wiener_anr_active || noise_update_counter >= noise_update_interval) {
       for (i = 0; i < MAX_BINS; i++) {
         double current_magnitude = cabs(r->fft_freq[i]);
 
