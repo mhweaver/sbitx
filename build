@@ -45,8 +45,27 @@ date
 mkdir -p "./audio"
 mkdir -p "./data"
 mkdir -p "./web"
+mkdir -p "./ext"
 
 git submodule update --init
+
+DEEPFILTERNET_DIR="./ext/DeepFilterNet"
+DEEPFILTERNET_REF="v0.5.6"
+if command -v cargo >/dev/null 2>&1; then
+	if [ ! -d "$DEEPFILTERNET_DIR/.git" ]; then
+		echo "Fetching DeepFilterNet $DEEPFILTERNET_REF"
+		git clone --depth 1 --branch "$DEEPFILTERNET_REF" https://github.com/Rikorose/DeepFilterNet.git "$DEEPFILTERNET_DIR"
+	else
+		echo "DeepFilterNet source already present"
+	fi
+	if ! grep -q "crate-type" "$DEEPFILTERNET_DIR/libDF/Cargo.toml"; then
+		perl -0pi -e 's/\[lib\]\s+name = "df"\s+path = "src\/lib.rs"/[lib]\nname = "df"\npath = "src\/lib.rs"\ncrate-type = ["cdylib", "rlib"]/s' "$DEEPFILTERNET_DIR/libDF/Cargo.toml"
+	fi
+	echo "Building DeepFilterNet C API"
+	cargo build --manifest-path "$DEEPFILTERNET_DIR/libDF/Cargo.toml" --release --features capi --no-default-features
+else
+	echo "cargo not found; install Rust/cargo to build DeepFilterNet support"
+fi
 
 if test -f "data/sbitx.db"; then
 	HAS_TX_POWER=`sqlite3 data/sbitx.db "SELECT COUNT(*) AS CNTREC FROM pragma_table_info('logbook') WHERE name='tx_power'"`

@@ -340,6 +340,18 @@ scroll the mouse wheel over it for fine adjustment.
   Audio Noise Reducer. Uses DSP to identify and cancel broadband background noise
   such as static crashes, mains hum, or fan noise in the received audio.
   Effective on weak signals buried in noise. May slightly degrade audio quality
+  depending on the selected algorithm.
+
+* ANRALG [WIENER|DEEPFILTER]
+  Selects the ANR algorithm. WIENER is the original frequency-domain filter.
+  DEEPFILTER uses DeepFilterNet on demodulated voice audio when ANR is on.
+
+* DFATTEN [0-100]
+  DeepFilterNet attenuation limit in dB.
+
+* DFPF [0-50]
+  DeepFilterNet post-filter beta, scaled by 1000. 0 disables the post-filter;
+  50 means beta 0.05.
   on very strong clean signals. Try it on and off to hear the difference.
 
 * APF [gain] [width]

@@ -42,6 +42,13 @@ extern double notch_bandwidth;
 
 //ANR (automatic noise reduction)
 extern int anr_enabled;
+enum anr_algorithm {
+	ANR_ALGORITHM_WIENER = 0,
+	ANR_ALGORITHM_DEEPFILTER = 1
+};
+extern int anr_algorithm;
+extern int deepfilter_atten_lim;
+extern int deepfilter_pf_beta;
 
 //rx DSP tool
 extern int dsp_enabled;

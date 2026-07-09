@@ -26,6 +26,7 @@
 #include "cessb.h"
 #include "hpsdr_p1.h"  // demonstrates using I and Q for other uses
 #include "squelch.h"   // FM squelch gate
+#include "deepfilter_anr.h"
 
 // ---------------------------------------------------------------------------
 // CTCSS (sub-audible tone) for FM mode
@@ -239,6 +240,9 @@ static int in_calibration = 1; // this turns off alc, clipping et al
 static double mode_bal = 1.0;   // RLB
 int dsp_enabled = 0;		   // dsp W2JON
 int anr_enabled = 0;		   // anr W2JON
+int anr_algorithm = ANR_ALGORITHM_WIENER;
+int deepfilter_atten_lim = 60;
+int deepfilter_pf_beta = 0; // stored as beta * 1000
 int notch_enabled = 0;		   // notch filter W2JON
 double notch_freq = 0;		   // Notch frequency in Hz W2JON
 double notch_bandwidth = 0;	   // Notch bandwidth in Hz W2JON
@@ -1541,7 +1545,7 @@ void rx_linear(const double *iq_i, const double *iq_q, int32_t *output_speaker, 
       }
     }
 
-    if (anr_enabled) {
+    if (anr_enabled && anr_algorithm == ANR_ALGORITHM_WIENER) {
       // Signal estimation for Wiener filter
       for (i = 0; i < MAX_BINS; i++) {
         double current_magnitude = cabs(r->fft_freq[i]);
@@ -1773,6 +1777,14 @@ void rx_linear(const double *iq_i, const double *iq_q, int32_t *output_speaker, 
   if (mute_count) {
     memset(output_speaker, 0, MAX_BINS / 2 * sizeof(int32_t));
     mute_count--;
+  }
+
+  if (anr_enabled && anr_algorithm == ANR_ALGORITHM_DEEPFILTER &&
+      r->mode != MODE_DIGITAL && r->mode != MODE_FT8 && r->mode != MODE_FT4 &&
+      r->mode != MODE_2TONE) {
+    deepfilter_anr_process(output_speaker, MAX_BINS / 2);
+  } else if (!anr_enabled || anr_algorithm != ANR_ALGORITHM_DEEPFILTER) {
+    deepfilter_anr_reset();
   }
 
   // Feed demodulated audio to modem decoders

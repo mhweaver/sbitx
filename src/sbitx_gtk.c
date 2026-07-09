@@ -889,6 +889,7 @@ int do_comp_edit(struct field *f, cairo_t *gfx, int event, int a, int b, int c);
 int do_txmon_edit(struct field *f, cairo_t *gfx, int event, int a, int b, int c);
 int do_wf_edit(struct field *f, cairo_t *gfx, int event, int a, int b, int c);
 int do_dsp_edit(struct field *f, cairo_t *gfx, int event, int a, int b, int c);
+int do_anr_edit(struct field *f, cairo_t *gfx, int event, int a, int b, int c);
 int do_vfo_keypad(struct field *f, cairo_t *gfx, int event, int a, int b, int c);
 int do_keypad_btn(struct field *f, cairo_t *gfx, int event, int a, int b, int c);
 int do_bfo_offset(struct field *f, cairo_t *gfx, int event, int a, int b, int c);
@@ -1242,6 +1243,12 @@ struct field main_controls[] = {
 	// ANR Control
 	{"#anr_plugin", do_toggle_option, 1000, -1000, 40, 40, "ANR", 40, "OFF", FIELD_TOGGLE, STYLE_FIELD_VALUE,
 	 "ON/OFF", 0, 0, 0, 0},
+	{"#anr_algorithm", do_dropdown, 1000, -1000, 40, 40, "ANRALG", 80, "WIENER", FIELD_DROPDOWN, STYLE_FIELD_VALUE,
+	 "WIENER/DEEPFILTER", 0, 0, 0, 0},
+	{"#deepfilter_atten", do_anr_edit, 1000, -1000, 40, 40, "DFATTEN", 80, "60", FIELD_NUMBER, STYLE_FIELD_VALUE,
+	 "", 0, 100, 1, 0},
+	{"#deepfilter_pf", do_anr_edit, 1000, -1000, 40, 40, "DFPF", 80, "0", FIELD_NUMBER, STYLE_FIELD_VALUE,
+	 "", 0, 50, 1, 0},
 
 	// APF (Audio Peak Filter) Controls
 	{"#apf_plugin", do_toggle_option, 1000, -1000, 40, 40, "APF", 40, "OFF", FIELD_TOGGLE, STYLE_FIELD_VALUE,
@@ -8261,6 +8268,19 @@ int do_dsp_edit(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
 	return 0;
 }
 
+int do_anr_edit(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
+{
+	struct field *atten_field = get_field("#deepfilter_atten");
+	struct field *pf_field = get_field("#deepfilter_pf");
+
+	if (atten_field)
+		deepfilter_atten_lim = atoi(atten_field->value);
+	if (pf_field)
+		deepfilter_pf_beta = atoi(pf_field->value);
+
+	return 0;
+}
+
 int do_bfo_offset(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
 {
 	// Retrieve and parse the BFO offset field
@@ -8374,6 +8394,7 @@ gboolean check_plugin_controls(gpointer data)
 	struct field *apf_stat = get_field("#apf_plugin");
 	struct field *dsp_stat = get_field("#dsp_plugin");
 	struct field *anr_stat = get_field("#anr_plugin");
+	struct field *anr_alg = get_field("#anr_algorithm");
 	struct field *eptt_stat = get_field("#eptt");
 	struct field *vfo_stat = get_field("#vfo_lock");
 	struct field *comp_stat = get_field("#comp_plugin");
@@ -8469,6 +8490,15 @@ gboolean check_plugin_controls(gpointer data)
     } else if (!strcmp(anr_stat->value, "OFF")) {
       anr_enabled = 0;
     }
+  }
+
+  if (anr_alg) {
+    if (!strcmp(anr_alg->value, "DEEPFILTER")) {
+      anr_algorithm = ANR_ALGORITHM_DEEPFILTER;
+    } else {
+      anr_algorithm = ANR_ALGORITHM_WIENER;
+    }
+    do_anr_edit(NULL, NULL, FIELD_EDIT, 0, 0, 0);
   }
   
   if (eptt_stat) {
@@ -11857,6 +11887,18 @@ else if (!strcasecmp(exec, "decode"))
 		}
 		do_dsp_edit(NULL, NULL, FIELD_EDIT, 0, 0, 0);
 	}
+	else if (!strcasecmp(exec, "anr"))
+	{
+		struct field *f = get_field_by_label("ANR");
+		if (f) {
+			for (char *p = args; *p; p++) *p = toupper(*p);
+			strncpy(f->value, args, sizeof(f->value) - 1);
+			f->value[sizeof(f->value) - 1] = '\0';
+			update_field(f);
+		}
+		anr_enabled = !strcmp(field_str("ANR"), "ON");
+		do_anr_edit(NULL, NULL, FIELD_EDIT, 0, 0, 0);
+	}
 	else if( strstr("80M60M40M30M20M17M15M12M10M", exec) != NULL ||
 		     strstr("80m60m40m30m20m17m15m12m10m", exec) != NULL){
 		change_band(exec);
@@ -11889,6 +11931,12 @@ else if (!strcasecmp(exec, "decode"))
 				f_focus = f_hover = f;
 				focus_since = millis();
 				update_field(f_hover);
+				if (!strcmp(exec, "ANRALG")) {
+					anr_algorithm = !strcmp(f->value, "DEEPFILTER") ? ANR_ALGORITHM_DEEPFILTER : ANR_ALGORITHM_WIENER;
+					do_anr_edit(NULL, NULL, FIELD_EDIT, 0, 0, 0);
+				} else if (!strcmp(exec, "DFATTEN") || !strcmp(exec, "DFPF")) {
+					do_anr_edit(NULL, NULL, FIELD_EDIT, 0, 0, 0);
+				}
 			}
 		}
 	}
@@ -12145,6 +12193,12 @@ int main(int argc, char *argv[])
 		strcat(directory, "/sbitx/data/default_settings.ini");
 		ini_parse(directory, user_settings_handler, NULL);
 	}
+
+	if (!strcmp(field_str("ANRALG"), "DEEPFILTER"))
+		anr_algorithm = ANR_ALGORITHM_DEEPFILTER;
+	else
+		anr_algorithm = ANR_ALGORITHM_WIENER;
+	do_anr_edit(NULL, NULL, FIELD_EDIT, 0, 0, 0);
 
 	/*
 	 * Start audio threads now that user_settings.ini has been loaded.
