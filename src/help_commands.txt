@@ -353,11 +353,6 @@ scroll the mouse wheel over it for fine adjustment.
   DeepFilterNet post-filter beta, scaled by 1000. 0 disables the post-filter;
   50 means beta 0.05.
 
-* DFMODEL [DF3-LL|DF3|DF2-LL|DF2]
-  Selects the DeepFilterNet model. Low-latency variants are marked LL. The
-  model is reloaded at runtime the next time DeepFilterNet ANR processes audio.
-  on very strong clean signals. Try it on and off to hear the difference.
-
 * APF [gain] [width]
   Audio Peak Filter. A narrow bandpass filter centred on the CW sidetone pitch
   that sharply attenuates all audio except a narrow slice around the CW tone.
