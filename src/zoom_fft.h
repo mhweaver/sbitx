@@ -26,6 +26,7 @@ struct zoom_fft_frame {
 	int analysis_bandwidth_hz;
 	int decimation;
 	int observation_samples;
+	uint64_t sample_end_ms;
 	uint64_t generation;
 	struct zoom_fft_config config;
 };
@@ -36,6 +37,7 @@ void zoom_fft_push(const double *i_samples, const double *q_samples, int count);
 void zoom_fft_request(const struct zoom_fft_config *config);
 bool zoom_fft_get_frame(const struct zoom_fft_config *config,
 						  struct zoom_fft_frame *frame);
+int zoom_fft_frame_latency_ms(const struct zoom_fft_frame *frame);
 void zoom_fft_reset(void);
 
 #endif

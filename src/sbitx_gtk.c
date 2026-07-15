@@ -246,6 +246,7 @@ struct spectrum_history_state {
 	bool in_tx;
 };
 static struct spectrum_history_state spectrum_history;
+static int spectrum_latency_ms = -1;
 
 #define MIN_WATERFALL_HEIGHT 10 // Define a minimum safe height
 #define WATERFALL_Y_OFFSET 2   // Pixels to move waterfall up from spectrum bottom
@@ -2463,6 +2464,7 @@ struct spectrum_display_frame {
 	int count;
 	double first_hz;
 	double bin_step_hz;
+	int latency_ms;
 	int span_hz;
 	int center_hz;
 	int mode;
@@ -2514,6 +2516,7 @@ static void spectrum_display_frame_get(struct spectrum_display_frame *frame)
 		memcpy(frame->bins, zoom.bins, frame->count * sizeof(frame->bins[0]));
 		frame->first_hz = zoom.first_hz;
 		frame->bin_step_hz = zoom.bin_step_hz;
+		frame->latency_ms = zoom_fft_frame_latency_ms(&zoom);
 		frame->span_hz = span_hz;
 		frame->center_hz = center_hz;
 		frame->mode = mode;
@@ -2525,6 +2528,7 @@ static void spectrum_display_frame_get(struct spectrum_display_frame *frame)
 		.count = 1,
 		.first_hz = center_hz,
 		.bin_step_hz = -span_hz,
+		.latency_ms = -1,
 		.span_hz = span_hz,
 		.center_hz = center_hz,
 		.mode = mode,
@@ -3713,6 +3717,32 @@ void draw_waterfall(struct field *f, cairo_t *gfx)
 	gdk_cairo_set_source_pixbuf(gfx, waterfall_pixbuf, f->x, f->y);
 	cairo_paint(gfx);
 	cairo_fill(gfx);
+
+	if (spectrum_latency_ms >= 0) {
+		char label[24];
+		if (spectrum_latency_ms < 1000)
+			snprintf(label, sizeof(label), "LAT %d ms", spectrum_latency_ms);
+		else
+			snprintf(label, sizeof(label), "LAT %.1f s", spectrum_latency_ms / 1000.0);
+
+		cairo_save(gfx);
+		cairo_select_font_face(gfx, "Sans", CAIRO_FONT_SLANT_NORMAL,
+							   CAIRO_FONT_WEIGHT_NORMAL);
+		cairo_set_font_size(gfx, 10);
+		cairo_text_extents_t extents;
+		cairo_text_extents(gfx, label, &extents);
+		double x = f->x + f->width - extents.x_bearing - extents.width - 4;
+		double y = f->y + f->height - extents.y_bearing - extents.height - 3;
+		cairo_set_source_rgba(gfx, 0.0, 0.0, 0.0, 0.65);
+		cairo_rectangle(gfx, x + extents.x_bearing - 3,
+						y + extents.y_bearing - 2,
+						extents.width + 6, extents.height + 4);
+		cairo_fill(gfx);
+		cairo_set_source_rgba(gfx, 1.0, 1.0, 1.0, 0.9);
+		cairo_move_to(gfx, x, y);
+		cairo_show_text(gfx, label);
+		cairo_restore(gfx);
+	}
 }
 
 void draw_spectrum_grid(struct field *f_spectrum, cairo_t *gfx,
@@ -4464,6 +4494,7 @@ void draw_spectrum(struct field *f_spectrum, cairo_t *gfx)
 
 	struct spectrum_display_frame display_frame;
 	spectrum_display_frame_get(&display_frame);
+	spectrum_latency_ms = display_frame.latency_ms;
 	prepare_spectrum_history(&display_frame);
 	int n_bins = display_frame.count;
 

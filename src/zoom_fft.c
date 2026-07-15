@@ -146,11 +146,13 @@ static void make_filter(int bandwidth_hz)
 		filter_coeff[tap] /= (float)sum;
 }
 
-static bool snapshot_samples(int count, uint64_t *first_sample)
+static bool snapshot_samples(int count, uint64_t *first_sample,
+							 uint64_t *sample_end_ms)
 {
 	uint64_t end = atomic_load_explicit(&samples_written, memory_order_acquire);
 	if (end < (uint64_t)count)
 		return false;
+	*sample_end_ms = monotonic_ms();
 
 	uint64_t start = end - count;
 	for (int index = 0; index < count; index++) {
@@ -205,8 +207,10 @@ static bool analyze(const struct zoom_fft_config *config,
 	int observed = observation_samples(config, decimation);
 	int raw_count = (observed - 1) * decimation + FILTER_TAPS;
 	uint64_t first_sample;
+	uint64_t sample_end_ms;
 
-	if (raw_count > RING_SIZE || !snapshot_samples(raw_count, &first_sample))
+	if (raw_count > RING_SIZE ||
+		!snapshot_samples(raw_count, &first_sample, &sample_end_ms))
 		return false;
 
 	if (bandwidth != filter_bandwidth_hz) {
@@ -256,6 +260,7 @@ static bool analyze(const struct zoom_fft_config *config,
 	frame->analysis_bandwidth_hz = bandwidth;
 	frame->decimation = decimation;
 	frame->observation_samples = observed;
+	frame->sample_end_ms = sample_end_ms;
 	frame->config = *config;
 
 	// CW timing belongs in the waterfall rows, not a multi-frame magnitude tail.
@@ -397,6 +402,19 @@ bool zoom_fft_get_frame(const struct zoom_fft_config *config,
 		*frame = published_frame;
 	pthread_mutex_unlock(&frame_mutex);
 	return available;
+}
+
+int zoom_fft_frame_latency_ms(const struct zoom_fft_frame *frame)
+{
+	if (!frame || !frame->sample_end_ms || frame->observation_samples < 1 ||
+		frame->decimation < 1)
+		return -1;
+
+	uint64_t now = monotonic_ms();
+	double age_ms = now > frame->sample_end_ms ? now - frame->sample_end_ms : 0;
+	double center_samples = (frame->observation_samples - 1) *
+		frame->decimation / 2.0 + (FILTER_TAPS - 1) / 2.0;
+	return (int)lround(age_ms + center_samples * 1000.0 / INPUT_RATE);
 }
 
 void zoom_fft_reset(void)
