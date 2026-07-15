@@ -5,19 +5,21 @@
 #include <stdint.h>
 
 #define ZOOM_FFT_DEFAULT_BINS 2048
-#define ZOOM_FFT_MAX_BINS 4096
+#define ZOOM_FFT_MAX_BINS 16384
+#define ZOOM_FFT_FRAME_BINS 2048
 
 struct zoom_fft_config {
 	int display_span_hz;
 	int center_hz;
 	int is_cw;
+	int is_tx;
 	int wpm;
 	int refresh_ms;
 	int fft_bins;
 };
 
 struct zoom_fft_frame {
-	int bins[ZOOM_FFT_MAX_BINS];
+	int bins[ZOOM_FFT_FRAME_BINS];
 	int count;
 	double first_hz;
 	double bin_step_hz;
@@ -31,12 +33,9 @@ struct zoom_fft_frame {
 int zoom_fft_init(void);
 void zoom_fft_shutdown(void);
 void zoom_fft_push(const double *i_samples, const double *q_samples, int count);
-bool zoom_fft_should_use(int display_span_hz, int plot_width, int fft_bins);
 void zoom_fft_request(const struct zoom_fft_config *config);
 bool zoom_fft_get_frame(const struct zoom_fft_config *config,
 						  struct zoom_fft_frame *frame);
-void zoom_fft_set_active(bool active);
-bool zoom_fft_is_active(void);
 void zoom_fft_reset(void);
 
 #endif

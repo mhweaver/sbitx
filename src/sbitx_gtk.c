@@ -243,9 +243,9 @@ struct spectrum_history_state {
 	int center_hz;
 	int mode;
 	int count;
+	bool in_tx;
 };
-static struct spectrum_history_state legacy_spectrum_history;
-static struct spectrum_history_state zoom_spectrum_history;
+static struct spectrum_history_state spectrum_history;
 
 #define MIN_WATERFALL_HEIGHT 10 // Define a minimum safe height
 #define WATERFALL_Y_OFFSET 2   // Pixels to move waterfall up from spectrum bottom
@@ -876,7 +876,6 @@ int data_delay = 700;
 #define MAX_RIT 25000
 
 int spectrum_span = 48000;
-extern int spectrum_plot[];
 extern int fwdpower, vswr;
 
 void do_control_action(char *cmd);
@@ -1185,7 +1184,7 @@ struct field main_controls[] = {
 	 "", 20, 150, 5, 0},
 
 	{"#wf_fftbins", NULL, 1000, -1000, 85, 40, "WF_FFTBINS", 50, "2048", FIELD_SELECTION, STYLE_FIELD_VALUE,
-	 "4096/2048/1024/512/0", 0, 0, 0, 0},
+	 "16384/8192/4096/2048/1024/512/256/128/64/32/16/8/4/2/1", 0, 0, 0, 0},
 
 	{"#scope_gain", do_wf_edit, 25, 1, 1, 10, "SCOPEGAIN", 10, "1.0", FIELD_NUMBER, STYLE_FIELD_VALUE,
 	 "", 1, 25, 1, 0},
@@ -2459,35 +2458,11 @@ static int spectrum_tuned_x(const struct field *f)
 	return spectrum_is_reversed() ? f->x + f->width - 1 : f->x;
 }
 
-static void spectrum_bin_range(int *start, int *end)
-{
-	const int center = 3 * MAX_BINS / 4;
-	const int bins = MAX(1, (int)(spectrum_display_span_hz() / 46.875));
-
-	if (!spectrum_uses_passband()) {
-		*start = center - bins / 2;
-		*end = *start + bins;
-	} else if (spectrum_is_reversed()) {
-		*start = center;
-		*end = center + bins;
-	} else {
-		*start = center - bins;
-		*end = center;
-	}
-}
-
-enum spectrum_frame_source {
-	SPECTRUM_FRAME_LEGACY = 0,
-	SPECTRUM_FRAME_ZOOM = 1,
-};
-
 struct spectrum_display_frame {
 	int bins[MAX_BINS];
 	int count;
 	double first_hz;
 	double bin_step_hz;
-	uint64_t generation;
-	int source;
 	int span_hz;
 	int center_hz;
 	int mode;
@@ -2508,26 +2483,7 @@ static int spectrum_refresh_interval_ms(int mode)
 	return MAX(1, MIN(interval, 500));
 }
 
-static void legacy_spectrum_frame(struct spectrum_display_frame *frame,
-								 int span_hz, int center_hz, int mode)
-{
-	int start, end;
-	spectrum_bin_range(&start, &end);
-	start = MAX(0, start);
-	end = MIN(MAX_BINS, end);
-	frame->count = MAX(1, end - start);
-	for (int index = 0; index < frame->count; index++)
-		frame->bins[index] = spectrum_plot[start + index];
-	frame->bin_step_hz = -96000.0 / MAX_BINS;
-	frame->first_hz = center_hz - frame->bin_step_hz * (frame->count - 1) / 2.0;
-	frame->generation = 0;
-	frame->source = SPECTRUM_FRAME_LEGACY;
-	frame->span_hz = span_hz;
-	frame->center_hz = center_hz;
-	frame->mode = mode;
-}
-
-static int spectrum_zoom_fft_bins(void)
+static int spectrum_fft_bins(void)
 {
 	static struct field *field;
 	if (!field)
@@ -2535,44 +2491,44 @@ static int spectrum_zoom_fft_bins(void)
 	return field ? atoi(field->value) : ZOOM_FFT_DEFAULT_BINS;
 }
 
-static void spectrum_display_frame_get(struct spectrum_display_frame *frame,
-									   int plot_width)
+static void spectrum_display_frame_get(struct spectrum_display_frame *frame)
 {
 	int span_hz = spectrum_display_span_hz();
 	int mode = mode_id(get_field("r1:mode")->value);
 	int center_hz = spectrum_uses_passband()
 		? (spectrum_is_reversed() ? -span_hz / 2 : span_hz / 2) : 0;
-	int fft_bins = spectrum_zoom_fft_bins();
-	bool wants_zoom = !in_tx && zoom_fft_should_use(span_hz, plot_width, fft_bins);
-
-	if (wants_zoom) {
-		struct zoom_fft_config config = {
-			.display_span_hz = span_hz,
-			.center_hz = center_hz,
-			.is_cw = mode == MODE_CW || mode == MODE_CWR,
-			.wpm = MAX(1, get_wpm()),
-			.refresh_ms = spectrum_refresh_interval_ms(mode),
-			.fft_bins = fft_bins,
-		};
-		struct zoom_fft_frame zoom;
-		zoom_fft_request(&config);
-		if (zoom_fft_get_frame(&config, &zoom)) {
-			frame->count = MIN(MAX_BINS, zoom.count);
-			memcpy(frame->bins, zoom.bins, frame->count * sizeof(frame->bins[0]));
-			frame->first_hz = zoom.first_hz;
-			frame->bin_step_hz = zoom.bin_step_hz;
-			frame->generation = zoom.generation;
-			frame->source = SPECTRUM_FRAME_ZOOM;
-			frame->span_hz = span_hz;
-			frame->center_hz = center_hz;
-			frame->mode = mode;
-			zoom_fft_set_active(true);
-			return;
-		}
+	int fft_bins = spectrum_fft_bins();
+	struct zoom_fft_config config = {
+		.display_span_hz = span_hz,
+		.center_hz = center_hz,
+		.is_cw = mode == MODE_CW || mode == MODE_CWR,
+		.is_tx = in_tx,
+		.wpm = MAX(1, get_wpm()),
+		.refresh_ms = spectrum_refresh_interval_ms(mode),
+		.fft_bins = fft_bins,
+	};
+	struct zoom_fft_frame zoom;
+	zoom_fft_request(&config);
+	if (zoom_fft_get_frame(&config, &zoom)) {
+		frame->count = MIN(MAX_BINS, zoom.count);
+		memcpy(frame->bins, zoom.bins, frame->count * sizeof(frame->bins[0]));
+		frame->first_hz = zoom.first_hz;
+		frame->bin_step_hz = zoom.bin_step_hz;
+		frame->span_hz = span_hz;
+		frame->center_hz = center_hz;
+		frame->mode = mode;
+		return;
 	}
 
-	zoom_fft_set_active(false);
-	legacy_spectrum_frame(frame, span_hz, center_hz, mode);
+	*frame = (struct spectrum_display_frame) {
+		.bins = {-120},
+		.count = 1,
+		.first_hz = center_hz,
+		.bin_step_hz = -span_hz,
+		.span_hz = span_hz,
+		.center_hz = center_hz,
+		.mode = mode,
+	};
 }
 
 void save_user_settings(int forced)
@@ -3795,48 +3751,39 @@ void draw_spectrum_grid(struct field *f_spectrum, cairo_t *gfx,
 	cairo_stroke(gfx);
 }
 
-static int last_spectrum_source = -1;
-
-static struct spectrum_history_state *spectrum_history_for_source(int source)
-{
-	return source == SPECTRUM_FRAME_ZOOM
-		? &zoom_spectrum_history : &legacy_spectrum_history;
-}
-
-// Clear averaging whenever the selected bin layout changes so incompatible
-// legacy and zoom frames are never mixed.
+// Clear averaging whenever the selected bin layout changes.
 static void prepare_spectrum_history(const struct spectrum_display_frame *frame)
 {
-	struct spectrum_history_state *history = spectrum_history_for_source(frame->source);
-	bool changed = !history->valid || last_spectrum_source != frame->source ||
-		history->span_hz != frame->span_hz || history->center_hz != frame->center_hz ||
-		history->mode != frame->mode || history->count != frame->count;
+	bool changed = !spectrum_history.valid ||
+		spectrum_history.span_hz != frame->span_hz ||
+		spectrum_history.center_hz != frame->center_hz ||
+		spectrum_history.mode != frame->mode ||
+		spectrum_history.count != frame->count || spectrum_history.in_tx != in_tx;
 	if (!changed)
 		return;
 
-	memset(history->frames, 0, sizeof(history->frames));
-	history->current_frame_index = 0;
-	history->valid = true;
-	history->span_hz = frame->span_hz;
-	history->center_hz = frame->center_hz;
-	history->mode = frame->mode;
-	history->count = frame->count;
-	last_spectrum_source = frame->source;
+	memset(spectrum_history.frames, 0, sizeof(spectrum_history.frames));
+	spectrum_history.current_frame_index = 0;
+	spectrum_history.valid = true;
+	spectrum_history.span_hz = frame->span_hz;
+	spectrum_history.center_hz = frame->center_hz;
+	spectrum_history.mode = frame->mode;
+	spectrum_history.count = frame->count;
+	spectrum_history.in_tx = in_tx;
 }
 
 static void update_spectrum_history(const struct spectrum_display_frame *frame)
 {
-	struct spectrum_history_state *history = spectrum_history_for_source(frame->source);
-	memcpy(history->frames[history->current_frame_index], frame->bins,
+	memcpy(spectrum_history.frames[spectrum_history.current_frame_index], frame->bins,
 		   frame->count * sizeof(frame->bins[0]));
 
-	history->current_frame_index = (history->current_frame_index + 1) % scope_avg;
+	spectrum_history.current_frame_index =
+		(spectrum_history.current_frame_index + 1) % scope_avg;
 }
 
 static void compute_time_based_average(int *averaged_spectrum,
 								   const struct spectrum_display_frame *display)
 {
-	struct spectrum_history_state *history = spectrum_history_for_source(display->source);
 	int n_bins = display->count;
 	memset(averaged_spectrum, 0, n_bins * sizeof(int));
 
@@ -3845,7 +3792,7 @@ static void compute_time_based_average(int *averaged_spectrum,
 	{
 		for (int bin = 0; bin < n_bins; bin++)
 		{
-			averaged_spectrum[bin] += history->frames[frame][bin];
+			averaged_spectrum[bin] += spectrum_history.frames[frame][bin];
 		}
 	}
 
@@ -4516,7 +4463,7 @@ void draw_spectrum(struct field *f_spectrum, cairo_t *gfx)
 	int last_y = 100;
 
 	struct spectrum_display_frame display_frame;
-	spectrum_display_frame_get(&display_frame, f->width);
+	spectrum_display_frame_get(&display_frame);
 	prepare_spectrum_history(&display_frame);
 	int n_bins = display_frame.count;
 
@@ -9899,7 +9846,6 @@ void web_get_spectrum(char *buff)
 	int j = 3;
 	if (in_tx)
 	{
-		zoom_fft_set_active(false);
 		strcpy(buff, "TX ");
 		for (int i = 0; i < MOD_MAX; i++)
 		{
@@ -9914,9 +9860,8 @@ void web_get_spectrum(char *buff)
 	}
 	else
 	{
-		struct field *spectrum = get_field("spectrum");
 		struct spectrum_display_frame frame;
-		spectrum_display_frame_get(&frame, spectrum ? spectrum->width : 800);
+		spectrum_display_frame_get(&frame);
 		strcpy(buff, "RX ");
 		for (int i = 0; i < frame.count; i++)
 		{

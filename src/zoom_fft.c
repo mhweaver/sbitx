@@ -11,11 +11,10 @@
 
 #define INPUT_RATE 96000.0
 #define MIN_ANALYSIS_BANDWIDTH 5000
-#define RING_SIZE 32768
+#define RING_SIZE 131072
 #define RING_MASK (RING_SIZE - 1)
 #define FILTER_TAPS 127
 #define ZOOM_SMOOTHING_SPEED 0.3f
-#define LEGACY_BIN_HZ 46.875
 
 static fftwf_complex sample_ring[RING_SIZE];
 static fftwf_complex raw_work[RING_SIZE];
@@ -28,7 +27,7 @@ static fftwf_plan fft_plan;
 static int planned_fft_bins;
 static float filter_coeff[FILTER_TAPS];
 static int filter_bandwidth_hz;
-static float smoothed_bins[ZOOM_FFT_MAX_BINS];
+static float smoothed_bins[ZOOM_FFT_FRAME_BINS];
 static struct zoom_fft_config smoothed_config;
 static bool smoothed_config_valid;
 
@@ -48,7 +47,6 @@ static struct zoom_fft_frame published_frame;
 static bool frame_ready;
 
 static _Atomic bool initialized;
-static _Atomic bool display_active;
 static _Atomic bool reset_smoothing;
 
 static bool same_analysis(const struct zoom_fft_config *a,
@@ -56,14 +54,14 @@ static bool same_analysis(const struct zoom_fft_config *a,
 {
 	return a->display_span_hz == b->display_span_hz &&
 		   a->center_hz == b->center_hz && a->is_cw == b->is_cw &&
-		   a->fft_bins == b->fft_bins &&
+		   a->is_tx == b->is_tx && a->fft_bins == b->fft_bins &&
 		   (!a->is_cw || a->wpm == b->wpm);
 }
 
 static bool valid_fft_bins(int fft_bins)
 {
-	return fft_bins == 512 || fft_bins == 1024 ||
-		   fft_bins == 2048 || fft_bins == 4096;
+	return fft_bins >= 1 && fft_bins <= ZOOM_FFT_MAX_BINS &&
+		   (fft_bins & (fft_bins - 1)) == 0;
 }
 
 static uint64_t monotonic_ms(void)
@@ -96,19 +94,6 @@ static int observation_samples(const struct zoom_fft_config *config, int decimat
 	if (count < 1) count = 1;
 	if (count > config->fft_bins) count = config->fft_bins;
 	return count;
-}
-
-bool zoom_fft_should_use(int display_span_hz, int plot_width, int fft_bins)
-{
-	if (display_span_hz <= 0 || plot_width <= 0 || !valid_fft_bins(fft_bins))
-		return false;
-
-	double legacy_bin_pixels = LEGACY_BIN_HZ * plot_width / display_span_hz;
-	struct zoom_fft_config config = {.display_span_hz = display_span_hz};
-	int decimation = analysis_decimation(&config);
-	double zoom_bin_hz = INPUT_RATE / decimation / fft_bins;
-	return legacy_bin_pixels > 2.0 && decimation > 1 &&
-		   zoom_bin_hz < LEGACY_BIN_HZ;
 }
 
 static bool ensure_fft_plan(int fft_bins)
@@ -259,11 +244,15 @@ static bool analyze(const struct zoom_fft_config *config,
 	double output_rate = INPUT_RATE / decimation;
 	double bin_hz = output_rate / fft_bins;
 	int half_bins = (int)floor(config->display_span_hz / (2.0 * bin_hz));
-	if (half_bins > fft_bins / 2 - 1)
-		half_bins = fft_bins / 2 - 1;
-	frame->count = 2 * half_bins + 1;
+	int max_half_bins = fft_bins > 1 ? fft_bins / 2 - 1 : 0;
+	if (half_bins > max_half_bins)
+		half_bins = max_half_bins;
+	int visible_bins = 2 * half_bins + 1;
+	frame->count = visible_bins < ZOOM_FFT_FRAME_BINS
+		? visible_bins : ZOOM_FFT_FRAME_BINS;
 	frame->first_hz = config->center_hz + half_bins * bin_hz;
-	frame->bin_step_hz = -bin_hz;
+	frame->bin_step_hz = frame->count > 1
+		? -(visible_bins - 1) * bin_hz / (frame->count - 1) : -bin_hz;
 	frame->analysis_bandwidth_hz = bandwidth;
 	frame->decimation = decimation;
 	frame->observation_samples = observed;
@@ -272,9 +261,14 @@ static bool analyze(const struct zoom_fft_config *config,
 	// CW timing belongs in the waterfall rows, not a multi-frame magnitude tail.
 	float speed = config->is_cw ? 1.0f : ZOOM_SMOOTHING_SPEED;
 	for (int output = 0; output < frame->count; output++) {
-		int signed_bin = half_bins - output;
-		int fft_bin = signed_bin >= 0 ? signed_bin : fft_bins + signed_bin;
-		float magnitude = cabsf(fft_output[fft_bin]);
+		int first_visible = output * visible_bins / frame->count;
+		int end_visible = (output + 1) * visible_bins / frame->count;
+		float magnitude = 0.0f;
+		for (int visible = first_visible; visible < end_visible; visible++) {
+			int signed_bin = half_bins - visible;
+			int fft_bin = signed_bin >= 0 ? signed_bin : fft_bins + signed_bin;
+			magnitude = fmaxf(magnitude, cabsf(fft_output[fft_bin]));
+		}
 		smoothed_bins[output] = (1.0f - speed) * smoothed_bins[output] +
 								 speed * magnitude;
 		frame->bins[output] = (int)lroundf(20.0f *
@@ -405,20 +399,9 @@ bool zoom_fft_get_frame(const struct zoom_fft_config *config,
 	return available;
 }
 
-void zoom_fft_set_active(bool active)
-{
-	atomic_store_explicit(&display_active, active, memory_order_release);
-}
-
-bool zoom_fft_is_active(void)
-{
-	return atomic_load_explicit(&display_active, memory_order_acquire);
-}
-
 void zoom_fft_reset(void)
 {
 	atomic_store_explicit(&reset_smoothing, true, memory_order_release);
-	zoom_fft_set_active(false);
 	pthread_mutex_lock(&request_mutex);
 	pending_serial++;
 	request_pending = false;
