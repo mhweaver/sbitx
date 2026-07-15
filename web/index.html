@@ -2673,7 +2673,7 @@
         let i = 0;
 
         for (let x = 0; x < width; x++) {
-            const bin = Math.floor((width - x) * scale);
+            const bin = Math.min(nbins - 1, Math.floor((width - 1 - x) * scale));
             let v = (update.charCodeAt(bin + 3) - 32) * 2;
             v = Math.min(v, 100);
 

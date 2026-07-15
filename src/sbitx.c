@@ -26,6 +26,7 @@
 #include "cessb.h"
 #include "hpsdr_p1.h"  // demonstrates using I and Q for other uses
 #include "squelch.h"   // FM squelch gate
+#include "zoom_fft.h"
 
 // ---------------------------------------------------------------------------
 // CTCSS (sub-audible tone) for FM mode
@@ -417,6 +418,8 @@ void fft_init()
 
 	make_hann_window(spectrum_window, MAX_BINS);
 	//make_kaiser(spectrum_window, MAX_BINS, 6.0);
+	if (zoom_fft_init() != 0)
+		fprintf(stderr, "Unable to initialize zoom FFT; using legacy display bins\n");
 }
 
 void fft_reset_m_bins()
@@ -460,6 +463,7 @@ void set_spectrum_speed(int speed)
 
 void spectrum_reset()
 {
+	zoom_fft_reset();
 	for (int i = 0; i < MAX_BINS; i++)
 		fft_bins[i] = 0;
 }
@@ -1415,16 +1419,18 @@ void rx_linear(const double *iq_i, const double *iq_q, int32_t *output_speaker, 
   // FFT for RX processing
   my_fftw_execute(plan_fwd);
 
-  // Spectrum / waterfall display path
-  // plan_spectrum was bound to fft_in as its input at creation time, so we
-  // apply the Hann window directly to fft_in before executing it.
-  // plan_fwd has already run at this point so fft_in is safe to modify.
-  for (i = 0; i < MAX_BINS; i++) {
-    __real__ fft_in[i] *= spectrum_window[i];
-    __imag__ fft_in[i] *= spectrum_window[i];
+  // The zoom analyzer owns a copy of the IQ samples and runs only at display
+  // cadence.  Its result replaces this display-only FFT, never plan_fwd.
+  if (!zoom_fft_is_active()) {
+    // plan_spectrum was bound to fft_in as its input at creation time, so we
+    // apply the Hann window directly to fft_in after plan_fwd has consumed it.
+    for (i = 0; i < MAX_BINS; i++) {
+      __real__ fft_in[i] *= spectrum_window[i];
+      __imag__ fft_in[i] *= spectrum_window[i];
+    }
+    my_fftw_execute(plan_spectrum);
+    spectrum_update();
   }
-  my_fftw_execute(plan_spectrum);
-  spectrum_update();
 
   // begin frequency-domain processing tasks
   // Copy FFT output into the rx structure.  IQ mixing already centered the
@@ -2398,6 +2404,9 @@ void sound_process(int32_t *input_rx, int32_t *input_mic, int32_t *output_speake
 
         // FIR low-pass filter after the mixer
         fir_lpf_iq(iq_i, iq_q, filt_i, filt_q, MAX_BINS / 2);
+
+        // Visual-only consumer: it copies and converts these samples to float.
+        zoom_fft_push(filt_i, filt_q, MAX_BINS / 2);
 
         // pass filtered I and Q data to receive pipeline
         rx_linear(filt_i, filt_q, output_speaker, output_tx, n_samples);

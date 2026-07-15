@@ -42,3 +42,7 @@ clean:
 test:
 	echo $(ALL_SOURCES)
 	echo $(OBJECTS)
+
+test-zoom-fft:
+	$(CC) -O2 -Isrc -o /tmp/sbitx-test-zoom-fft tests/test_zoom_fft.c src/zoom_fft.c -lfftw3f -lm -pthread
+	/tmp/sbitx-test-zoom-fft

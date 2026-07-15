@@ -62,6 +62,7 @@ The initial sync between the gui values, the core radio values, settings, et al 
 #include <time.h>
 #include "cessb.h"
 #include "freq_keypad.h"
+#include "zoom_fft.h"
 extern int get_rx_gain(void);
 extern int calculate_s_meter(struct rx *r, double rx_gain);
 extern struct rx *rx_list;
@@ -234,14 +235,20 @@ float pw_max = 0.0;
 int tune_key=0; // CW tuning
 
 #define AVERAGING_FRAMES 15 // Number of frames to average
-// Buffer to hold past spectrum data
-static int spectrum_history[AVERAGING_FRAMES][MAX_BINS] = {0};
+struct spectrum_history_state {
+	int frames[AVERAGING_FRAMES][MAX_BINS];
+	int current_frame_index;
+	bool valid;
+	int span_hz;
+	int center_hz;
+	int mode;
+	int count;
+};
+static struct spectrum_history_state legacy_spectrum_history;
+static struct spectrum_history_state zoom_spectrum_history;
 
 #define MIN_WATERFALL_HEIGHT 10 // Define a minimum safe height
 #define WATERFALL_Y_OFFSET 2   // Pixels to move waterfall up from spectrum bottom
-
-// Index of the current frame in the history buffer
-static int current_frame_index = 0;
 
 /* Front Panel controls */
 char pins[15] = {0, 2, 3, 6, 7,
@@ -2466,6 +2473,95 @@ static void spectrum_bin_range(int *start, int *end)
 	}
 }
 
+enum spectrum_frame_source {
+	SPECTRUM_FRAME_LEGACY = 0,
+	SPECTRUM_FRAME_ZOOM = 1,
+};
+
+struct spectrum_display_frame {
+	int bins[MAX_BINS];
+	int count;
+	double first_hz;
+	double bin_step_hz;
+	uint64_t generation;
+	int source;
+	int span_hz;
+	int center_hz;
+	int mode;
+};
+
+static int spectrum_refresh_interval_ms(int mode)
+{
+	int interval = wf_spd;
+	if (mode == MODE_CW || mode == MODE_CWR) {
+		// A narrow-band full FFT can span several CW elements.  The zoom analyzer
+		// caps its observation at one dit; refresh at least that often as well so
+		// marks and gaps remain distinct instead of being blended or skipped.
+		int wpm = MAX(1, get_wpm());
+		interval = MAX(20, MIN(interval, 1200 / wpm));
+	} else if ((mode == MODE_FT4 || mode == MODE_FT8) && interval < 50) {
+		interval = 50;
+	}
+	return MAX(1, MIN(interval, 500));
+}
+
+static void legacy_spectrum_frame(struct spectrum_display_frame *frame,
+								 int span_hz, int center_hz, int mode)
+{
+	int start, end;
+	spectrum_bin_range(&start, &end);
+	start = MAX(0, start);
+	end = MIN(MAX_BINS, end);
+	frame->count = MAX(1, end - start);
+	for (int index = 0; index < frame->count; index++)
+		frame->bins[index] = spectrum_plot[start + index];
+	frame->bin_step_hz = -96000.0 / MAX_BINS;
+	frame->first_hz = center_hz - frame->bin_step_hz * (frame->count - 1) / 2.0;
+	frame->generation = 0;
+	frame->source = SPECTRUM_FRAME_LEGACY;
+	frame->span_hz = span_hz;
+	frame->center_hz = center_hz;
+	frame->mode = mode;
+}
+
+static void spectrum_display_frame_get(struct spectrum_display_frame *frame,
+									   int plot_width)
+{
+	int span_hz = spectrum_display_span_hz();
+	int mode = mode_id(get_field("r1:mode")->value);
+	int center_hz = spectrum_uses_passband()
+		? (spectrum_is_reversed() ? -span_hz / 2 : span_hz / 2) : 0;
+	bool wants_zoom = !in_tx && zoom_fft_should_use(span_hz, plot_width);
+
+	if (wants_zoom) {
+		struct zoom_fft_config config = {
+			.display_span_hz = span_hz,
+			.center_hz = center_hz,
+			.is_cw = mode == MODE_CW || mode == MODE_CWR,
+			.wpm = MAX(1, get_wpm()),
+			.refresh_ms = spectrum_refresh_interval_ms(mode),
+		};
+		struct zoom_fft_frame zoom;
+		zoom_fft_request(&config);
+		if (zoom_fft_get_frame(&config, &zoom)) {
+			frame->count = MIN(MAX_BINS, zoom.count);
+			memcpy(frame->bins, zoom.bins, frame->count * sizeof(frame->bins[0]));
+			frame->first_hz = zoom.first_hz;
+			frame->bin_step_hz = zoom.bin_step_hz;
+			frame->generation = zoom.generation;
+			frame->source = SPECTRUM_FRAME_ZOOM;
+			frame->span_hz = span_hz;
+			frame->center_hz = center_hz;
+			frame->mode = mode;
+			zoom_fft_set_active(true);
+			return;
+		}
+	}
+
+	zoom_fft_set_active(false);
+	legacy_spectrum_frame(frame, span_hz, center_hz, mode);
+}
+
 void save_user_settings(int forced)
 {
 	static int last_save_at = 0;
@@ -3686,17 +3782,49 @@ void draw_spectrum_grid(struct field *f_spectrum, cairo_t *gfx,
 	cairo_stroke(gfx);
 }
 
-void update_spectrum_history(int *current_spectrum, int n_bins)
-{
-	// Add the current spectrum data to the history buffer
-	memcpy(spectrum_history[current_frame_index], current_spectrum, n_bins * sizeof(int));
+static int last_spectrum_source = -1;
 
-	// Advance to the next frame index, wrapping around if needed
-	current_frame_index = (current_frame_index + 1) % scope_avg;
+static struct spectrum_history_state *spectrum_history_for_source(int source)
+{
+	return source == SPECTRUM_FRAME_ZOOM
+		? &zoom_spectrum_history : &legacy_spectrum_history;
 }
 
-void compute_time_based_average(int *averaged_spectrum, int n_bins)
+// Clear averaging whenever the selected bin layout changes so incompatible
+// legacy and zoom frames are never mixed.
+static void prepare_spectrum_history(const struct spectrum_display_frame *frame)
 {
+	struct spectrum_history_state *history = spectrum_history_for_source(frame->source);
+	bool changed = !history->valid || last_spectrum_source != frame->source ||
+		history->span_hz != frame->span_hz || history->center_hz != frame->center_hz ||
+		history->mode != frame->mode || history->count != frame->count;
+	if (!changed)
+		return;
+
+	memset(history->frames, 0, sizeof(history->frames));
+	history->current_frame_index = 0;
+	history->valid = true;
+	history->span_hz = frame->span_hz;
+	history->center_hz = frame->center_hz;
+	history->mode = frame->mode;
+	history->count = frame->count;
+	last_spectrum_source = frame->source;
+}
+
+static void update_spectrum_history(const struct spectrum_display_frame *frame)
+{
+	struct spectrum_history_state *history = spectrum_history_for_source(frame->source);
+	memcpy(history->frames[history->current_frame_index], frame->bins,
+		   frame->count * sizeof(frame->bins[0]));
+
+	history->current_frame_index = (history->current_frame_index + 1) % scope_avg;
+}
+
+static void compute_time_based_average(int *averaged_spectrum,
+								   const struct spectrum_display_frame *display)
+{
+	struct spectrum_history_state *history = spectrum_history_for_source(display->source);
+	int n_bins = display->count;
 	memset(averaged_spectrum, 0, n_bins * sizeof(int));
 
 	// Sum the values from all frames in the history
@@ -3704,7 +3832,7 @@ void compute_time_based_average(int *averaged_spectrum, int n_bins)
 	{
 		for (int bin = 0; bin < n_bins; bin++)
 		{
-			averaged_spectrum[bin] += spectrum_history[frame][bin];
+			averaged_spectrum[bin] += history->frames[frame][bin];
 		}
 	}
 
@@ -4374,9 +4502,10 @@ void draw_spectrum(struct field *f_spectrum, cairo_t *gfx)
 	// we only plot the second half of the bins (on the lower sideband
 	int last_y = 100;
 
-	int starting_bin, ending_bin;
-	spectrum_bin_range(&starting_bin, &ending_bin);
-	int n_bins = ending_bin - starting_bin;
+	struct spectrum_display_frame display_frame;
+	spectrum_display_frame_get(&display_frame, f->width);
+	prepare_spectrum_history(&display_frame);
+	int n_bins = display_frame.count;
 
 	float x_step = (1.0 * f->width) / n_bins;
 
@@ -4395,12 +4524,12 @@ void draw_spectrum(struct field *f_spectrum, cairo_t *gfx)
 
 	// Compute the time-based average spectrum
 	int averaged_spectrum[MAX_BINS];
-	compute_time_based_average(averaged_spectrum, MAX_BINS);
+	compute_time_based_average(averaged_spectrum, &display_frame);
 
 	// Find min and max values for dynamic range computation
-	for (int i = starting_bin; i < ending_bin; i++)
+	for (int i = 0; i < n_bins; i++)
 	{
-		int raw_value = spectrum_plot[i] + waterfall_offset; // Use raw spectrum for waterfall
+		int raw_value = display_frame.bins[i] + waterfall_offset;
 		if (raw_value < min_value)
 			min_value = raw_value;
 		if (raw_value > max_value)
@@ -4438,12 +4567,12 @@ void draw_spectrum(struct field *f_spectrum, cairo_t *gfx)
 	// of the graph.
 	static float sp_baseline_offs = 0.0;
 
-	for (int i = starting_bin; i < ending_bin; i++)
+	for (int i = 0; i < n_bins; i++)
 	{
 		int y;
 
 		// Original scaling for the waterfall (unchanged)
-		int raw_value = spectrum_plot[i] + waterfall_offset; // Use original data for waterfall
+		int raw_value = display_frame.bins[i] + waterfall_offset;
 		y = ((raw_value)*f->height) / 80;					 // Original linear scaling for waterfall
 
 		// Clamp y for valid range (for the waterfall)
@@ -4506,7 +4635,7 @@ void draw_spectrum(struct field *f_spectrum, cairo_t *gfx)
 	cairo_stroke(gfx);
 
 	// Update the history buffer with the current spectrum
-	update_spectrum_history(spectrum_plot, MAX_BINS);
+	update_spectrum_history(&display_frame);
 
 	if (pitch >= f_spectrum->x)
 	{
@@ -9753,13 +9882,10 @@ int web_get_console(char *buff, int max)
 
 void web_get_spectrum(char *buff)
 {
-
-	int starting_bin, ending_bin;
-	spectrum_bin_range(&starting_bin, &ending_bin);
-
 	int j = 3;
 	if (in_tx)
 	{
+		zoom_fft_set_active(false);
 		strcpy(buff, "TX ");
 		for (int i = 0; i < MOD_MAX; i++)
 		{
@@ -9774,10 +9900,13 @@ void web_get_spectrum(char *buff)
 	}
 	else
 	{
+		struct field *spectrum = get_field("spectrum");
+		struct spectrum_display_frame frame;
+		spectrum_display_frame_get(&frame, spectrum ? spectrum->width : 800);
 		strcpy(buff, "RX ");
-		for (int i = starting_bin; i <= ending_bin; i++)
+		for (int i = 0; i < frame.count; i++)
 		{
-			int y = spectrum_plot[i] + waterfall_offset;
+			int y = frame.bins[i] + waterfall_offset;
 			if (y > 95)
 				buff[j++] = 127;
 			else if (y >= 0)
@@ -10053,57 +10182,19 @@ gboolean ui_tick(gpointer gook)
 		// write_console(STYLE_LOG, message);
 	}
 
+	int current_mode = mode_id(get_field("r1:mode")->value);
 	// every 20 ticks call modem_poll to see if any modes need work done
 	if (ticks % 20 == 0)
-		modem_poll(mode_id(get_field("r1:mode")->value));
+		modem_poll(current_mode);
 	else
 	{
 		// calling modem_poll every 20 ticks isn't enough to keep up with a fast
 		// straight key, so now we go on _every_ tick in MODE_CW or MODE_CWR
-		if ((mode_id(get_field("r1:mode")->value)) == MODE_CW ||
-			(mode_id(get_field("r1:mode")->value)) == MODE_CWR)
-			modem_poll(mode_id(get_field("r1:mode")->value));
+		if (current_mode == MODE_CW || current_mode == MODE_CWR)
+			modem_poll(current_mode);
 	}
 
-	int tick_count = 100;
-
-	switch (mode_id(field_str("MODE")))
-	{
-	case MODE_CW:
-	case MODE_CWR:
-		tick_count = wf_spd; // Use wf_spd for CW and CWR modes
-		break;
-
-	case MODE_FT4:
-	case MODE_FT8:
-		if (wf_spd < 50)
-		{
-			tick_count = 50; // Ensure tick_count is at least 50 if wf_spd is too low
-		}
-		else
-		{
-			tick_count = wf_spd; // Use wf_spd as tick_count otherwise
-		}
-		break;
-
-	case MODE_AM:
-		tick_count = wf_spd; // Use wf_spd for AM mode
-		break;
-
-	default:
-		tick_count = wf_spd; // Default to wf_spd
-		break;
-	}
-
-	// Ensure tick_count is within reasonable bounds
-	if (tick_count < 1)
-	{
-		tick_count = 1; // Minimum tick_count to avoid division by zero or overly frequent updates
-	}
-	else if (tick_count > 500)
-	{
-		tick_count = 500; // Arbitrary maximum to prevent too infrequent updates
-	}
+	int tick_count = spectrum_refresh_interval_ms(current_mode);
 	if (ticks >= tick_count)
 	{
 
@@ -12402,6 +12493,7 @@ void cleanup_on_exit() {
 
 	// Add any other cleanup tasks here
 	printf("Cleaning up resources before exit\n");
+	zoom_fft_shutdown();
 
 	// Close ADIF broadcast socket
 	adif_broadcast_close();
