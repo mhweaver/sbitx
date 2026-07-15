@@ -3719,11 +3719,8 @@ void draw_waterfall(struct field *f, cairo_t *gfx)
 	cairo_fill(gfx);
 
 	if (spectrum_latency_ms >= 0) {
-		char label[24];
-		if (spectrum_latency_ms < 1000)
-			snprintf(label, sizeof(label), "LAT %d ms", spectrum_latency_ms);
-		else
-			snprintf(label, sizeof(label), "LAT %.1f s", spectrum_latency_ms / 1000.0);
+		char label[32];
+		snprintf(label, sizeof(label), "WF Latency %d ms", spectrum_latency_ms);
 
 		cairo_save(gfx);
 		cairo_select_font_face(gfx, "Sans", CAIRO_FONT_SLANT_NORMAL,
