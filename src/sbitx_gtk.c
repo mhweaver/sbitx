@@ -3719,6 +3719,28 @@ void draw_waterfall(struct field *f, cairo_t *gfx)
 	cairo_fill(gfx);
 
 	if (spectrum_latency_ms >= 0) {
+		enum {
+			LATENCY_GREEN,
+			LATENCY_YELLOW,
+			LATENCY_ORANGE,
+			LATENCY_RED,
+		};
+		static int previous_band = -1;
+		static unsigned long band_changed_at;
+		int band = spectrum_latency_ms <= 90 ? LATENCY_GREEN
+			: spectrum_latency_ms < 150 ? LATENCY_YELLOW
+			: spectrum_latency_ms <= 300 ? LATENCY_ORANGE : LATENCY_RED;
+		unsigned long now = sbitx_millis();
+		if (band != previous_band) {
+			previous_band = band;
+			band_changed_at = now;
+		}
+		unsigned long band_age = now - band_changed_at;
+		// Low-latency colors pulse once; warning colors remain visible.
+		bool show_color = band == LATENCY_RED ||
+			(band == LATENCY_ORANGE && band_age >= 120) ||
+			(band < LATENCY_ORANGE && band_age < 300);
+
 		char label[32];
 		snprintf(label, sizeof(label), "WF Latency %d ms", spectrum_latency_ms);
 
@@ -3730,12 +3752,24 @@ void draw_waterfall(struct field *f, cairo_t *gfx)
 		cairo_text_extents(gfx, label, &extents);
 		double x = f->x + f->width - extents.x_bearing - extents.width - 4;
 		double y = f->y + f->height - extents.y_bearing - extents.height - 3;
-		cairo_set_source_rgba(gfx, 0.0, 0.0, 0.0, 0.65);
+		if (!show_color)
+			cairo_set_source_rgba(gfx, 0.0, 0.0, 0.0, 0.65);
+		else if (band == LATENCY_GREEN)
+			cairo_set_source_rgba(gfx, 0.1, 0.7, 0.2, 0.9);
+		else if (band == LATENCY_YELLOW)
+			cairo_set_source_rgba(gfx, 1.0, 0.8, 0.0, 0.9);
+		else if (band == LATENCY_ORANGE)
+			cairo_set_source_rgba(gfx, 1.0, 0.4, 0.0, 0.9);
+		else
+			cairo_set_source_rgba(gfx, 0.85, 0.05, 0.05, 0.9);
 		cairo_rectangle(gfx, x + extents.x_bearing - 3,
 						y + extents.y_bearing - 2,
 						extents.width + 6, extents.height + 4);
 		cairo_fill(gfx);
-		cairo_set_source_rgba(gfx, 1.0, 1.0, 1.0, 0.9);
+		if (show_color && band != LATENCY_RED)
+			cairo_set_source_rgba(gfx, 0.0, 0.0, 0.0, 0.9);
+		else
+			cairo_set_source_rgba(gfx, 1.0, 1.0, 1.0, 0.9);
 		cairo_move_to(gfx, x, y);
 		cairo_show_text(gfx, label);
 		cairo_restore(gfx);
