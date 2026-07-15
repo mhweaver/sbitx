@@ -530,6 +530,11 @@ the spectrum display, waterfall appearance, and advanced hardware options.
   Slower speeds spread signals out vertically and are easier to read.
   Default: 100. Recommended: 50-100 for SSB/CW, 100+ for digital modes.
 
+* WF_FFTBINS [0|512|1024|2048|4096]
+  Sets the FFT size used by the high-resolution zoom scope and waterfall.
+  Larger values improve frequency detail but use more CPU. Set to 0 to disable
+  the zoom FFT and always use the legacy spectrum bins. Default: 2048.
+
 #Mode-Specific Controls
 
 These controls only appear on the main display when a particular mode is active.

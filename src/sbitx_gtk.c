@@ -1184,6 +1184,9 @@ struct field main_controls[] = {
 	{"#wf_spd", do_wf_edit, 150, 20, 5, 50, "WFSPD", 50, "50", FIELD_NUMBER, STYLE_FIELD_VALUE,
 	 "", 20, 150, 5, 0},
 
+	{"#wf_fftbins", NULL, 1000, -1000, 85, 40, "WF_FFTBINS", 50, "2048", FIELD_SELECTION, STYLE_FIELD_VALUE,
+	 "0/512/1024/2048/4096", 0, 0, 0, 0},
+
 	{"#scope_gain", do_wf_edit, 25, 1, 1, 10, "SCOPEGAIN", 10, "1.0", FIELD_NUMBER, STYLE_FIELD_VALUE,
 	 "", 1, 25, 1, 0},
 
@@ -2524,6 +2527,14 @@ static void legacy_spectrum_frame(struct spectrum_display_frame *frame,
 	frame->mode = mode;
 }
 
+static int spectrum_zoom_fft_bins(void)
+{
+	static struct field *field;
+	if (!field)
+		field = get_field("#wf_fftbins");
+	return field ? atoi(field->value) : ZOOM_FFT_DEFAULT_BINS;
+}
+
 static void spectrum_display_frame_get(struct spectrum_display_frame *frame,
 									   int plot_width)
 {
@@ -2531,7 +2542,8 @@ static void spectrum_display_frame_get(struct spectrum_display_frame *frame,
 	int mode = mode_id(get_field("r1:mode")->value);
 	int center_hz = spectrum_uses_passband()
 		? (spectrum_is_reversed() ? -span_hz / 2 : span_hz / 2) : 0;
-	bool wants_zoom = !in_tx && zoom_fft_should_use(span_hz, plot_width);
+	int fft_bins = spectrum_zoom_fft_bins();
+	bool wants_zoom = !in_tx && zoom_fft_should_use(span_hz, plot_width, fft_bins);
 
 	if (wants_zoom) {
 		struct zoom_fft_config config = {
@@ -2540,6 +2552,7 @@ static void spectrum_display_frame_get(struct spectrum_display_frame *frame,
 			.is_cw = mode == MODE_CW || mode == MODE_CWR,
 			.wpm = MAX(1, get_wpm()),
 			.refresh_ms = spectrum_refresh_interval_ms(mode),
+			.fft_bins = fft_bins,
 		};
 		struct zoom_fft_frame zoom;
 		zoom_fft_request(&config);
@@ -5078,6 +5091,7 @@ void menu2_display(int show) {
 		field_move("WFMIN", SC(5), screen_height - SC(80), SC(70), SC(37));
 		field_move("WFMAX", SC(5), screen_height - SC(40), SC(70), SC(37));
 		field_move("WFSPD", SC(80), screen_height - SC(80), SC(70), SC(37));
+		field_move("WF_FFTBINS", SC(80), screen_height - SC(40), SC(85), SC(37));
 		field_move("SCOPEGAIN", SC(170), screen_height - SC(80), SC(70), SC(37));
 		field_move("SCOPEAVG", SC(170), screen_height - SC(40), SC(70), SC(37));  // Add SCOPEAVG field
 		field_move("SCOPESIZE", SC(245), screen_height - SC(80), SC(70), SC(37)); // Add SCOPESIZE field

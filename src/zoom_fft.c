@@ -15,6 +15,7 @@
 #define RING_MASK (RING_SIZE - 1)
 #define FILTER_TAPS 127
 #define ZOOM_SMOOTHING_SPEED 0.3f
+#define LEGACY_BIN_HZ 46.875
 
 static fftwf_complex sample_ring[RING_SIZE];
 static fftwf_complex raw_work[RING_SIZE];
@@ -24,9 +25,10 @@ static _Atomic uint64_t samples_written;
 static fftwf_complex *fft_input;
 static fftwf_complex *fft_output;
 static fftwf_plan fft_plan;
+static int planned_fft_bins;
 static float filter_coeff[FILTER_TAPS];
 static int filter_bandwidth_hz;
-static float smoothed_bins[ZOOM_FFT_BINS];
+static float smoothed_bins[ZOOM_FFT_MAX_BINS];
 static struct zoom_fft_config smoothed_config;
 static bool smoothed_config_valid;
 
@@ -54,7 +56,14 @@ static bool same_analysis(const struct zoom_fft_config *a,
 {
 	return a->display_span_hz == b->display_span_hz &&
 		   a->center_hz == b->center_hz && a->is_cw == b->is_cw &&
+		   a->fft_bins == b->fft_bins &&
 		   (!a->is_cw || a->wpm == b->wpm);
+}
+
+static bool valid_fft_bins(int fft_bins)
+{
+	return fft_bins == 512 || fft_bins == 1024 ||
+		   fft_bins == 2048 || fft_bins == 4096;
 }
 
 static uint64_t monotonic_ms(void)
@@ -79,25 +88,57 @@ static int analysis_decimation(const struct zoom_fft_config *config)
 static int observation_samples(const struct zoom_fft_config *config, int decimation)
 {
 	if (!config->is_cw)
-		return ZOOM_FFT_BINS;
+		return config->fft_bins;
 
 	int wpm = config->wpm > 0 ? config->wpm : 1;
 	double sample_rate = INPUT_RATE / decimation;
 	int count = (int)lround(sample_rate * 1.2 / wpm);
 	if (count < 1) count = 1;
-	if (count > ZOOM_FFT_BINS) count = ZOOM_FFT_BINS;
+	if (count > config->fft_bins) count = config->fft_bins;
 	return count;
 }
 
-bool zoom_fft_should_use(int display_span_hz, int plot_width)
+bool zoom_fft_should_use(int display_span_hz, int plot_width, int fft_bins)
 {
-	if (display_span_hz <= 0 || plot_width <= 0)
+	if (display_span_hz <= 0 || plot_width <= 0 || !valid_fft_bins(fft_bins))
 		return false;
 
-	double legacy_bin_pixels = (INPUT_RATE / ZOOM_FFT_BINS) * plot_width /
-								 display_span_hz;
+	double legacy_bin_pixels = LEGACY_BIN_HZ * plot_width / display_span_hz;
 	struct zoom_fft_config config = {.display_span_hz = display_span_hz};
-	return legacy_bin_pixels > 2.0 && analysis_decimation(&config) > 1;
+	int decimation = analysis_decimation(&config);
+	double zoom_bin_hz = INPUT_RATE / decimation / fft_bins;
+	return legacy_bin_pixels > 2.0 && decimation > 1 &&
+		   zoom_bin_hz < LEGACY_BIN_HZ;
+}
+
+static bool ensure_fft_plan(int fft_bins)
+{
+	if (fft_bins == planned_fft_bins)
+		return true;
+
+	fftwf_complex *new_input = fftwf_malloc(sizeof(*new_input) * fft_bins);
+	fftwf_complex *new_output = fftwf_malloc(sizeof(*new_output) * fft_bins);
+	if (!new_input || !new_output) {
+		if (new_input) fftwf_free(new_input);
+		if (new_output) fftwf_free(new_output);
+		return false;
+	}
+	fftwf_plan new_plan = fftwf_plan_dft_1d(fft_bins, new_input, new_output,
+										FFTW_FORWARD, FFTW_ESTIMATE);
+	if (!new_plan) {
+		fftwf_free(new_input);
+		fftwf_free(new_output);
+		return false;
+	}
+
+	if (fft_plan) fftwf_destroy_plan(fft_plan);
+	if (fft_input) fftwf_free(fft_input);
+	if (fft_output) fftwf_free(fft_output);
+	fft_input = new_input;
+	fft_output = new_output;
+	fft_plan = new_plan;
+	planned_fft_bins = fft_bins;
+	return true;
 }
 
 static void make_filter(int bandwidth_hz)
@@ -170,6 +211,10 @@ static void shift_samples(int count, int center_hz, uint64_t first_sample)
 static bool analyze(const struct zoom_fft_config *config,
 					struct zoom_fft_frame *frame)
 {
+	if (!valid_fft_bins(config->fft_bins) || !ensure_fft_plan(config->fft_bins))
+		return false;
+
+	int fft_bins = config->fft_bins;
 	int bandwidth = analysis_bandwidth(config);
 	int decimation = analysis_decimation(config);
 	int observed = observation_samples(config, decimation);
@@ -184,9 +229,9 @@ static bool analyze(const struct zoom_fft_config *config,
 		filter_bandwidth_hz = bandwidth;
 	}
 	shift_samples(raw_count, config->center_hz, first_sample);
-	memset(fft_input, 0, sizeof(*fft_input) * ZOOM_FFT_BINS);
+	memset(fft_input, 0, sizeof(*fft_input) * fft_bins);
 
-	float length_scale = (float)ZOOM_FFT_BINS / observed;
+	float length_scale = (float)fft_bins / observed;
 	for (int output = 0; output < observed; output++) {
 		int newest = FILTER_TAPS - 1 + output * decimation;
 		float sum_i = 0.0f;
@@ -212,10 +257,10 @@ static bool analyze(const struct zoom_fft_config *config,
 	}
 
 	double output_rate = INPUT_RATE / decimation;
-	double bin_hz = output_rate / ZOOM_FFT_BINS;
+	double bin_hz = output_rate / fft_bins;
 	int half_bins = (int)floor(config->display_span_hz / (2.0 * bin_hz));
-	if (half_bins > ZOOM_FFT_BINS / 2 - 1)
-		half_bins = ZOOM_FFT_BINS / 2 - 1;
+	if (half_bins > fft_bins / 2 - 1)
+		half_bins = fft_bins / 2 - 1;
 	frame->count = 2 * half_bins + 1;
 	frame->first_hz = config->center_hz + half_bins * bin_hz;
 	frame->bin_step_hz = -bin_hz;
@@ -228,7 +273,7 @@ static bool analyze(const struct zoom_fft_config *config,
 	float speed = config->is_cw ? 1.0f : ZOOM_SMOOTHING_SPEED;
 	for (int output = 0; output < frame->count; output++) {
 		int signed_bin = half_bins - output;
-		int fft_bin = signed_bin >= 0 ? signed_bin : ZOOM_FFT_BINS + signed_bin;
+		int fft_bin = signed_bin >= 0 ? signed_bin : fft_bins + signed_bin;
 		float magnitude = cabsf(fft_output[fft_bin]);
 		smoothed_bins[output] = (1.0f - speed) * smoothed_bins[output] +
 								 speed * magnitude;
@@ -276,15 +321,6 @@ int zoom_fft_init(void)
 	if (atomic_load_explicit(&initialized, memory_order_acquire))
 		return 0;
 
-	fft_input = fftwf_malloc(sizeof(*fft_input) * ZOOM_FFT_BINS);
-	fft_output = fftwf_malloc(sizeof(*fft_output) * ZOOM_FFT_BINS);
-	if (!fft_input || !fft_output)
-		goto fail;
-	fft_plan = fftwf_plan_dft_1d(ZOOM_FFT_BINS, fft_input, fft_output,
-								 FFTW_FORWARD, FFTW_ESTIMATE);
-	if (!fft_plan)
-		goto fail;
-
 	atomic_store_explicit(&samples_written, 0, memory_order_relaxed);
 	stop_worker = false;
 	request_pending = false;
@@ -292,19 +328,14 @@ int zoom_fft_init(void)
 	frame_ready = false;
 	smoothed_config_valid = false;
 	filter_bandwidth_hz = 0;
-	if (pthread_create(&worker_thread, NULL, zoom_worker, NULL) != 0)
-		goto fail;
-	atomic_store_explicit(&initialized, true, memory_order_release);
-	return 0;
-
-fail:
-	if (fft_plan) fftwf_destroy_plan(fft_plan);
-	if (fft_input) fftwf_free(fft_input);
-	if (fft_output) fftwf_free(fft_output);
+	planned_fft_bins = 0;
 	fft_plan = NULL;
 	fft_input = NULL;
 	fft_output = NULL;
-	return -1;
+	if (pthread_create(&worker_thread, NULL, zoom_worker, NULL) != 0)
+		return -1;
+	atomic_store_explicit(&initialized, true, memory_order_release);
+	return 0;
 }
 
 void zoom_fft_shutdown(void)
@@ -317,12 +348,13 @@ void zoom_fft_shutdown(void)
 	pthread_cond_signal(&request_cond);
 	pthread_mutex_unlock(&request_mutex);
 	pthread_join(worker_thread, NULL);
-	fftwf_destroy_plan(fft_plan);
-	fftwf_free(fft_input);
-	fftwf_free(fft_output);
+	if (fft_plan) fftwf_destroy_plan(fft_plan);
+	if (fft_input) fftwf_free(fft_input);
+	if (fft_output) fftwf_free(fft_output);
 	fft_plan = NULL;
 	fft_input = NULL;
 	fft_output = NULL;
+	planned_fft_bins = 0;
 }
 
 void zoom_fft_push(const double *i_samples, const double *q_samples, int count)
