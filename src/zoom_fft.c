@@ -220,7 +220,8 @@ static bool analyze(const struct zoom_fft_config *config,
 	shift_samples(raw_count, config->center_hz, first_sample);
 	memset(fft_input, 0, sizeof(*fft_input) * fft_bins);
 
-	float length_scale = (float)fft_bins / observed;
+	// Keep signal levels independent of FFT length, preserving 2048-bin levels.
+	float length_scale = (float)ZOOM_FFT_DEFAULT_BINS / observed;
 	for (int output = 0; output < observed; output++) {
 		int newest = FILTER_TAPS - 1 + output * decimation;
 		float sum_i = 0.0f;
