@@ -1185,7 +1185,7 @@ struct field main_controls[] = {
 	 "", 20, 150, 5, 0},
 
 	{"#wf_fftbins", NULL, 1000, -1000, 85, 40, "WF_FFTBINS", 50, "2048", FIELD_SELECTION, STYLE_FIELD_VALUE,
-	 "0/512/1024/2048/4096", 0, 0, 0, 0},
+	 "4096/2048/1024/512/0", 0, 0, 0, 0},
 
 	{"#scope_gain", do_wf_edit, 25, 1, 1, 10, "SCOPEGAIN", 10, "1.0", FIELD_NUMBER, STYLE_FIELD_VALUE,
 	 "", 1, 25, 1, 0},
