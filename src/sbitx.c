@@ -26,7 +26,7 @@
 #include "cessb.h"
 #include "hpsdr_p1.h"  // demonstrates using I and Q for other uses
 #include "squelch.h"   // FM squelch gate
-#include "zoom_fft.h"
+#include "panadapter_fft.h"
 
 // ---------------------------------------------------------------------------
 // CTCSS (sub-audible tone) for FM mode
@@ -205,6 +205,7 @@ fftw_complex *fft_out; // holds the incoming samples in freq domain (for rx as w
 fftw_complex *fft_in;  // holds the incoming samples in time domain (for rx as well as tx)
 fftw_complex *fft_m;   // holds previous samples for overlap and discard convolution
 fftw_plan plan_fwd, plan_tx;
+struct panadapter_fft *panadapter_fft_context;
 int bfo_freq = 40035000;
 int bfo_freq_runtime_offset = 0; // Runtime bfo offset
 int freq_hdr = -1;
@@ -406,8 +407,11 @@ void fft_init()
 		__imag__ fft_m[i] = 0.0;
 	}
 
-	if (zoom_fft_init() != 0)
-		fprintf(stderr, "Unable to initialize visual FFT\n");
+	panadapter_fft_context = panadapter_fft_create();
+	if (!panadapter_fft_context) {
+		fprintf(stderr, "Unable to initialize panadapter FFT\n");
+		exit(EXIT_FAILURE);
+	}
 }
 
 void fft_reset_m_bins()
@@ -439,11 +443,6 @@ int mag2db(double mag)
 		p = p >> 1;
 	}
 	return c;
-}
-
-void spectrum_reset()
-{
-	zoom_fft_reset();
 }
 
 /*
@@ -2158,7 +2157,7 @@ void tx_process(
 		}
 		visual_phase = (visual_phase + 1) & 3;
 	}
-	zoom_fft_push(visual_i, visual_q, MAX_BINS / 2);
+	panadapter_fft_push(panadapter_fft_context, visual_i, visual_q, MAX_BINS / 2);
 
 	read_power();
 
@@ -2246,7 +2245,7 @@ void sound_process(int32_t *input_rx, int32_t *input_mic, int32_t *output_speake
         fir_lpf_iq(iq_i, iq_q, filt_i, filt_q, MAX_BINS / 2);
 
         // Visual-only consumer: it copies and converts these samples to float.
-        zoom_fft_push(filt_i, filt_q, MAX_BINS / 2);
+        panadapter_fft_push(panadapter_fft_context, filt_i, filt_q, MAX_BINS / 2);
 
         // pass filtered I and Q data to receive pipeline
         rx_linear(filt_i, filt_q, output_speaker, output_tx, n_samples);
@@ -2571,7 +2570,7 @@ void tr_switch(int tx_on) {
         delay(20);
     }
     digitalWrite(TX_LINE, HIGH);
-    spectrum_reset();
+    panadapter_fft_reset(panadapter_fft_context);
  
     fwdpower = 0;
     alc_level=1.0;
@@ -2623,7 +2622,7 @@ void tr_switch(int tx_on) {
        even though Capture is now open -- input_q[] fills with real signal
        but output is suppressed until the DSP chain has stabilised. */
     sound_mixer(audio_card, "Capture", rx_gain);
-    spectrum_reset();
+    panadapter_fft_reset(panadapter_fft_context);
 
     // item fpr read_power
     fwdpower = 0;

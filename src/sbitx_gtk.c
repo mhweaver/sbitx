@@ -62,7 +62,7 @@ The initial sync between the gui values, the core radio values, settings, et al 
 #include <time.h>
 #include "cessb.h"
 #include "freq_keypad.h"
-#include "zoom_fft.h"
+#include "panadapter_fft.h"
 extern int get_rx_gain(void);
 extern int calculate_s_meter(struct rx *r, double rx_gain);
 extern struct rx *rx_list;
@@ -2472,16 +2472,8 @@ struct spectrum_display_frame {
 
 static int spectrum_refresh_interval_ms(int mode)
 {
-	int interval = wf_spd;
-	if (mode == MODE_CW || mode == MODE_CWR) {
-		// A narrow-band full FFT can span several CW elements.  The zoom analyzer
-		// caps its observation at one dit; refresh at least that often as well so
-		// marks and gaps remain distinct instead of being blended or skipped.
-		int wpm = MAX(1, get_wpm());
-		interval = MAX(20, MIN(interval, 1200 / wpm));
-	} else if ((mode == MODE_FT4 || mode == MODE_FT8) && interval < 50) {
-		interval = 50;
-	}
+	const int interval = mode == MODE_FT4 || mode == MODE_FT8
+		? MAX(wf_spd, 50) : wf_spd;
 	return MAX(1, MIN(interval, 500));
 }
 
@@ -2490,7 +2482,7 @@ static int spectrum_fft_bins(void)
 	static struct field *field;
 	if (!field)
 		field = get_field("#wf_fftbins");
-	return field ? atoi(field->value) : ZOOM_FFT_DEFAULT_BINS;
+	return field ? atoi(field->value) : PANADAPTER_FFT_DEFAULT_BINS;
 }
 
 static void spectrum_display_frame_get(struct spectrum_display_frame *frame)
@@ -2500,7 +2492,7 @@ static void spectrum_display_frame_get(struct spectrum_display_frame *frame)
 	int center_hz = spectrum_uses_passband()
 		? (spectrum_is_reversed() ? -span_hz / 2 : span_hz / 2) : 0;
 	int fft_bins = spectrum_fft_bins();
-	struct zoom_fft_config config = {
+	struct panadapter_fft_config config = {
 		.display_span_hz = span_hz,
 		.center_hz = center_hz,
 		.is_cw = mode == MODE_CW || mode == MODE_CWR,
@@ -2509,14 +2501,15 @@ static void spectrum_display_frame_get(struct spectrum_display_frame *frame)
 		.refresh_ms = spectrum_refresh_interval_ms(mode),
 		.fft_bins = fft_bins,
 	};
-	struct zoom_fft_frame zoom;
-	zoom_fft_request(&config);
-	if (zoom_fft_get_frame(&config, &zoom)) {
-		frame->count = MIN(MAX_BINS, zoom.count);
-		memcpy(frame->bins, zoom.bins, frame->count * sizeof(frame->bins[0]));
-		frame->first_hz = zoom.first_hz;
-		frame->bin_step_hz = zoom.bin_step_hz;
-		frame->latency_ms = zoom_fft_frame_latency_ms(&zoom);
+	struct panadapter_fft_frame panadapter;
+	panadapter_fft_request(panadapter_fft_context, &config);
+	if (panadapter_fft_get_frame(panadapter_fft_context, &config, &panadapter)) {
+		frame->count = MIN(MAX_BINS, panadapter.count);
+		memcpy(frame->bins, panadapter.bins,
+			frame->count * sizeof(frame->bins[0]));
+		frame->first_hz = panadapter.first_hz;
+		frame->bin_step_hz = panadapter.bin_step_hz;
+		frame->latency_ms = panadapter_fft_frame_latency_ms(&panadapter);
 		frame->span_hz = span_hz;
 		frame->center_hz = center_hz;
 		frame->mode = mode;
@@ -3719,27 +3712,15 @@ void draw_waterfall(struct field *f, cairo_t *gfx)
 	cairo_fill(gfx);
 
 	if (spectrum_latency_ms >= 0) {
-		enum {
-			LATENCY_GREEN,
-			LATENCY_YELLOW,
-			LATENCY_ORANGE,
-			LATENCY_RED,
-		};
-		static int previous_band = -1;
-		static unsigned long band_changed_at;
-		int band = spectrum_latency_ms <= 90 ? LATENCY_GREEN
+			enum {
+				LATENCY_GREEN,
+				LATENCY_YELLOW,
+				LATENCY_ORANGE,
+				LATENCY_RED,
+			};
+		const int band = spectrum_latency_ms <= 90 ? LATENCY_GREEN
 			: spectrum_latency_ms < 150 ? LATENCY_YELLOW
 			: spectrum_latency_ms <= 300 ? LATENCY_ORANGE : LATENCY_RED;
-		unsigned long now = sbitx_millis();
-		if (band != previous_band) {
-			previous_band = band;
-			band_changed_at = now;
-		}
-		unsigned long band_age = now - band_changed_at;
-		// Low-latency colors pulse once; warning colors remain visible.
-		bool show_color = band == LATENCY_RED ||
-			(band == LATENCY_ORANGE && band_age >= 120) ||
-			(band < LATENCY_ORANGE && band_age < 300);
 
 		char label[32];
 		snprintf(label, sizeof(label), "WF Latency %d ms", spectrum_latency_ms);
@@ -3750,11 +3731,9 @@ void draw_waterfall(struct field *f, cairo_t *gfx)
 		cairo_set_font_size(gfx, 10);
 		cairo_text_extents_t extents;
 		cairo_text_extents(gfx, label, &extents);
-		double x = f->x + f->width - extents.x_bearing - extents.width - 4;
-		double y = f->y + f->height - extents.y_bearing - extents.height - 3;
-		if (!show_color)
-			cairo_set_source_rgba(gfx, 0.0, 0.0, 0.0, 0.65);
-		else if (band == LATENCY_GREEN)
+		const double x = f->x + f->width - extents.x_bearing - extents.width - 4;
+		const double y = f->y + f->height - extents.y_bearing - extents.height - 3;
+		if (band == LATENCY_GREEN)
 			cairo_set_source_rgba(gfx, 0.1, 0.7, 0.2, 0.9);
 		else if (band == LATENCY_YELLOW)
 			cairo_set_source_rgba(gfx, 1.0, 0.8, 0.0, 0.9);
@@ -3766,7 +3745,7 @@ void draw_waterfall(struct field *f, cairo_t *gfx)
 						y + extents.y_bearing - 2,
 						extents.width + 6, extents.height + 4);
 		cairo_fill(gfx);
-		if (show_color && band != LATENCY_RED)
+		if (band != LATENCY_RED)
 			cairo_set_source_rgba(gfx, 0.0, 0.0, 0.0, 0.9);
 		else
 			cairo_set_source_rgba(gfx, 1.0, 1.0, 1.0, 0.9);
@@ -12514,7 +12493,6 @@ void cleanup_on_exit() {
 
 	// Add any other cleanup tasks here
 	printf("Cleaning up resources before exit\n");
-	zoom_fft_shutdown();
 
 	// Close ADIF broadcast socket
 	adif_broadcast_close();

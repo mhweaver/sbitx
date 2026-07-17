@@ -83,7 +83,8 @@ int q_length(struct Queue *p);
 int32_t q_read(struct Queue *p);
 int q_write(struct Queue *p, int w);
 void q_empty(struct Queue *p);
-#define SAMPLE_RATE 48000
+/* Complex I/Q sample rate used by the DSP, VFO, and panadapter. */
+#define SDR_SAMPLE_RATE 96000
 #define MAX_BINS 2048
 
 /*
@@ -192,6 +193,8 @@ struct rx {
 
 extern struct rx *rx_list;
 extern int freq_hdr;
+struct panadapter_fft;
+extern struct panadapter_fft *panadapter_fft_context;
 
 void set_lo(int frequency);
 void set_volume(double v);
