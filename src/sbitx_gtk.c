@@ -63,6 +63,7 @@ The initial sync between the gui values, the core radio values, settings, et al 
 #include "cessb.h"
 #include "freq_keypad.h"
 #include "panadapter_fft.h"
+#include "panadapter_view.h"
 extern int get_rx_gain(void);
 extern int calculate_s_meter(struct rx *r, double rx_gain);
 extern struct rx *rx_list;
@@ -75,6 +76,7 @@ extern float vmax; // vlevel meter, now with log voltage levels - not power
 float vlevels[12]= {.1, .126, .158, .2, .25, .316, .398, .5, .631, .794, 1.0, 1.26};
 void change_band(char *request);
 void highlight_band_field(int new_band);
+void invalidate_rect(int x, int y, int width, int height);
 /* command  buffer for commands received from the remote */
 struct Queue q_remote_commands;
 struct Queue q_tx_text;
@@ -247,6 +249,11 @@ struct spectrum_history_state {
 };
 static struct spectrum_history_state spectrum_history;
 static int spectrum_latency_ms = -1;
+static struct panadapter_view panadapter_view = {1.0, 0.0};
+static struct panadapter_view touch_start_view;
+static double touch_start_x;
+static bool panadapter_touch_active;
+static GtkGesture *panadapter_touch_gesture;
 
 #define MIN_WATERFALL_HEIGHT 10 // Define a minimum safe height
 #define WATERFALL_Y_OFFSET 2   // Pixels to move waterfall up from spectrum bottom
@@ -2422,17 +2429,31 @@ static bool spectrum_is_reversed(void)
 	return mode == MODE_LSB || mode == MODE_CWR;
 }
 
-static int spectrum_display_span_hz(void)
+static int spectrum_base_span_hz(void)
 {
 	int span = spectrum_uses_passband() ? atoi(get_field("r1:high")->value) : spectrum_span;
 	return span > 0 ? span : 1;
 }
 
-static long spectrum_view_start(long tuned_freq, int span_hz)
+static int spectrum_display_span_hz(void)
+{
+	return panadapter_view_span_hz(&panadapter_view, spectrum_base_span_hz());
+}
+
+static long spectrum_default_view_start(long tuned_freq, int base_span_hz)
 {
 	if (!spectrum_uses_passband())
-		return tuned_freq - span_hz / 2;
-	return spectrum_is_reversed() ? tuned_freq - span_hz : tuned_freq;
+		return tuned_freq - base_span_hz / 2;
+	return spectrum_is_reversed() ? tuned_freq - base_span_hz : tuned_freq;
+}
+
+static long spectrum_view_start(long tuned_freq)
+{
+	const int base_span_hz = spectrum_base_span_hz();
+	const int span_hz = spectrum_display_span_hz();
+	return spectrum_default_view_start(tuned_freq, base_span_hz)
+		+ (base_span_hz - span_hz) / 2
+		+ panadapter_view_center_hz(&panadapter_view, base_span_hz);
 }
 
 // Map a frequency to a clamped pixel edge shared by all spectrum overlays.
@@ -2448,16 +2469,16 @@ static int spectrum_frequency_x(const struct field *f, int64_t frequency,
 // Round a grid division to the frequency precision shown by its label.
 static long spectrum_grid_frequency(long view_start, int span_hz, int division)
 {
-	const int resolution = (span_hz == 25000 || span_hz == 10000) ? 1000 : 100;
+	const int resolution = span_hz >= 10000 ? 1000
+		: span_hz >= 1000 ? 100 : span_hz >= 100 ? 10 : 1;
 	const long frequency = view_start + (int64_t)span_hz * division / 10;
 	return ((frequency + resolution / 2) / resolution) * resolution;
 }
 
-static int spectrum_tuned_x(const struct field *f)
+static int spectrum_tuned_x(const struct field *f, long tuned_freq,
+							long view_start, int span_hz)
 {
-	if (!spectrum_uses_passband())
-		return f->x + f->width / 2;
-	return spectrum_is_reversed() ? f->x + f->width - 1 : f->x;
+	return spectrum_frequency_x(f, tuned_freq, view_start, span_hz);
 }
 
 struct spectrum_display_frame {
@@ -2480,10 +2501,13 @@ static int spectrum_refresh_interval_ms(int mode)
 
 static void spectrum_display_frame_get(struct spectrum_display_frame *frame)
 {
+	const int base_span_hz = spectrum_base_span_hz();
 	const int span_hz = spectrum_display_span_hz();
 	const int mode = mode_id(get_field("r1:mode")->value);
-	const int center_hz = spectrum_uses_passband()
-		? (spectrum_is_reversed() ? -span_hz / 2 : span_hz / 2) : 0;
+	const int default_center_hz = spectrum_uses_passband()
+		? (spectrum_is_reversed() ? -base_span_hz / 2 : base_span_hz / 2) : 0;
+	const int center_hz = default_center_hz
+		+ panadapter_view_center_hz(&panadapter_view, base_span_hz);
 	const struct field *const spectrum = get_field("spectrum");
 	const struct panadapter_fft_config config = {
 		.display_span_hz = span_hz,
@@ -3434,6 +3458,119 @@ static int *wf = NULL;
 GdkPixbuf *waterfall_pixbuf = NULL;
 guint8 *waterfall_map = NULL;
 
+enum panadapter_control {
+	PANADAPTER_RESET,
+	PANADAPTER_LEFT,
+	PANADAPTER_RIGHT,
+	PANADAPTER_ZOOM_OUT,
+	PANADAPTER_ZOOM_IN,
+	PANADAPTER_CONTROL_COUNT,
+};
+
+static void panadapter_view_refresh(void)
+{
+	if (waterfall_map) {
+		struct field *waterfall = get_field("waterfall");
+		memset(waterfall_map, 0, waterfall->width * waterfall->height * 3);
+	}
+	panadapter_fft_reset(panadapter_fft_context);
+	struct field *spectrum = get_field("spectrum");
+	struct field *waterfall = get_field("waterfall");
+	invalidate_rect(spectrum->x, spectrum->y, spectrum->width, spectrum->height);
+	invalidate_rect(waterfall->x, waterfall->y, waterfall->width, waterfall->height);
+}
+
+static void panadapter_control_rect(const struct field *f, int control,
+									int *x, int *y, int *size)
+{
+	*size = MIN(SC(34), f->height - SC(10));
+	*x = f->x + SC(5) + control * (*size + SC(4));
+	*y = f->y + f->height - *size - SC(5);
+}
+
+static void draw_panadapter_control(struct field *f, cairo_t *gfx, int control)
+{
+	int x, y, size;
+	panadapter_control_rect(f, control, &x, &y, &size);
+	const double cx = x + size / 2.0;
+	const double cy = y + size / 2.0;
+
+	cairo_save(gfx);
+	cairo_set_source_rgba(gfx, 0.05, 0.05, 0.05, 0.82);
+	cairo_rectangle(gfx, x, y, size, size);
+	cairo_fill_preserve(gfx);
+	cairo_set_source_rgba(gfx, 1.0, 1.0, 1.0, 0.85);
+	cairo_set_line_width(gfx, MAX(1.5, size / 16.0));
+	cairo_stroke(gfx);
+
+	if (control == PANADAPTER_LEFT || control == PANADAPTER_RIGHT) {
+		const double direction = control == PANADAPTER_LEFT ? -1.0 : 1.0;
+		cairo_move_to(gfx, cx + direction * size * 0.22, cy - size * 0.22);
+		cairo_line_to(gfx, cx - direction * size * 0.06, cy);
+		cairo_line_to(gfx, cx + direction * size * 0.22, cy + size * 0.22);
+		cairo_move_to(gfx, cx - direction * size * 0.06, cy);
+		cairo_line_to(gfx, cx - direction * size * 0.25, cy);
+		cairo_stroke(gfx);
+	} else if (control == PANADAPTER_ZOOM_OUT || control == PANADAPTER_ZOOM_IN) {
+		const double radius = size * 0.20;
+		cairo_arc(gfx, cx - size * 0.07, cy - size * 0.07, radius, 0, 2 * M_PI);
+		cairo_move_to(gfx, cx + size * 0.08, cy + size * 0.08);
+		cairo_line_to(gfx, cx + size * 0.27, cy + size * 0.27);
+		cairo_move_to(gfx, cx - size * 0.18, cy - size * 0.07);
+		cairo_line_to(gfx, cx + size * 0.04, cy - size * 0.07);
+		if (control == PANADAPTER_ZOOM_IN) {
+			cairo_move_to(gfx, cx - size * 0.07, cy - size * 0.18);
+			cairo_line_to(gfx, cx - size * 0.07, cy + size * 0.04);
+		}
+		cairo_stroke(gfx);
+	} else {
+		cairo_arc(gfx, cx, cy, size * 0.23, -0.3, 1.7 * M_PI);
+		cairo_stroke(gfx);
+		cairo_move_to(gfx, cx + size * 0.22, cy - size * 0.12);
+		cairo_line_to(gfx, cx + size * 0.31, cy - size * 0.27);
+		cairo_line_to(gfx, cx + size * 0.10, cy - size * 0.25);
+		cairo_close_path(gfx);
+		cairo_fill(gfx);
+	}
+	cairo_restore(gfx);
+}
+
+static void draw_panadapter_controls(struct field *f, cairo_t *gfx)
+{
+	for (int control = 0; control < PANADAPTER_CONTROL_COUNT; control++) {
+		if (control != PANADAPTER_RESET || !panadapter_view_is_default(&panadapter_view))
+			draw_panadapter_control(f, gfx, control);
+	}
+}
+
+static bool activate_panadapter_control(struct field *f, int pointer_x, int pointer_y)
+{
+	for (int control = 0; control < PANADAPTER_CONTROL_COUNT; control++) {
+		if (control == PANADAPTER_RESET && panadapter_view_is_default(&panadapter_view))
+			continue;
+		int x, y, size;
+		panadapter_control_rect(f, control, &x, &y, &size);
+		if (pointer_x < x || pointer_x >= x + size || pointer_y < y || pointer_y >= y + size)
+			continue;
+
+		const struct panadapter_view previous = panadapter_view;
+		if (control == PANADAPTER_RESET)
+			panadapter_view_reset(&panadapter_view);
+		else if (control == PANADAPTER_LEFT)
+			panadapter_view_pan(&panadapter_view, -0.15);
+		else if (control == PANADAPTER_RIGHT)
+			panadapter_view_pan(&panadapter_view, 0.15);
+		else
+			panadapter_view_zoom_at(&panadapter_view,
+				control == PANADAPTER_ZOOM_IN ? 1.25 : 0.8, 0.5);
+		if (fabs(previous.zoom - panadapter_view.zoom) > 0.001
+			|| fabs(previous.center - panadapter_view.center) > 0.0001)
+			panadapter_view_refresh();
+		return true;
+	}
+	return false;
+}
+
 // Flag to override remote display disabling
 static int override_remote_display = 0;
 static int override_remote_display_timeout = 300; // 5 minutes
@@ -3727,6 +3864,7 @@ void draw_waterfall(struct field *f, cairo_t *gfx)
 		cairo_show_text(gfx, label);
 		cairo_restore(gfx);
 	}
+	draw_panadapter_controls(f, gfx);
 }
 
 void draw_spectrum_grid(struct field *f_spectrum, cairo_t *gfx,
@@ -3834,7 +3972,7 @@ static void draw_oob_band_strip(struct field *f, cairo_t *gfx,
 	if (all_class_only) return;
 
 	const int   STRIP_H = 5;
-	const long  vis_start = spectrum_view_start(tuned_freq, span_hz);
+	const long  vis_start = spectrum_view_start(tuned_freq);
 	const long  vis_stop  = vis_start + span_hz;
 	const int   strip_y   = f->y + (grid_height / 2) - (STRIP_H / 2);  // vertically centered
 
@@ -3931,11 +4069,11 @@ void draw_spectrum(struct field *f_spectrum, cairo_t *gfx)
 		? field_int("RIT_DELTA") : 0;
 	long display_freq = freq + rit_delta_value;
 	const int span_hz = spectrum_display_span_hz();
-	const long view_start = spectrum_view_start(display_freq, span_hz);
+	const long view_start = spectrum_view_start(display_freq);
 	bw_high = atoi(get_field("r1:high")->value);
 	bw_low = atoi(get_field("r1:low")->value);
 	grid_height = f_spectrum->height - ((font_table[STYLE_SMALL].height * 4) / 3);
-	const int tuned_x = spectrum_tuned_x(f_spectrum);
+	const int tuned_x = spectrum_tuned_x(f_spectrum, display_freq, view_start, span_hz);
 
 	// calculate the position of bandwidth strip
 	long filter_freq_start, filter_freq_stop;
@@ -4379,7 +4517,7 @@ void draw_spectrum(struct field *f_spectrum, cairo_t *gfx)
 	for (int division = 1; division < 10; division++)
 	{
 		long label_frequency = spectrum_grid_frequency(view_start, span_hz, division);
-		if ((span_hz == 25000) || (span_hz == 10000))
+		if (span_hz >= 10000)
 		{
 			sprintf(freq_text, "%ld", label_frequency / 1000);
 		}
@@ -4640,9 +4778,7 @@ void draw_spectrum(struct field *f_spectrum, cairo_t *gfx)
 	// draw the needle
 	for (struct rx *r = rx_list; r; r = r->next)
 	{
-		int needle_x = spectrum_uses_passband()
-			? tuned_x - f->x
-			: (f->width * (MAX_BINS / 2 - r->tuned_bin)) / (MAX_BINS / 2);
+		int needle_x = tuned_x - f->x;
 		fill_rect(gfx, f->x + needle_x, f->y, 1, grid_height, SPECTRUM_NEEDLE);
 
 		// Draw TX frequency indicator when RIT is enabled
@@ -6129,20 +6265,14 @@ int do_spectrum(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
 			f_pitch = get_field("rx_pitch");
 			pitch = atoi(f_pitch->value);
 			float position = (float)(a - f->x) / (float)f->width;
-			float offset = spectrum_uses_passband()
-				? (spectrum_is_reversed() ? position - 1.0f : position)
-				: position - 0.5f;
+			freq = spectrum_view_start(freq) + position * span;
 			if (mode == MODE_CW)
 			{
-				freq += (offset * span) - pitch;
+				freq -= pitch;
 			}
 			else if (mode == MODE_CWR)
 			{
-				freq += (offset * span) + pitch;
-			}
-			else
-			{ // other modes may need to be optimized - k3ng 2022-09-02
-				freq += offset * span;
+				freq += pitch;
 			}
 			sprintf(buff, "%ld", freq);
 			set_field("r1:freq", buff);
@@ -6174,6 +6304,10 @@ int do_waterfall(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
 		// Force redraw
 		invalidate_rect(0, 0, 800, 480);
 	}
+
+	if (event == GDK_BUTTON_PRESS && c == GDK_BUTTON_PRIMARY
+		&& activate_panadapter_control(f, a, b))
+		return 1;
 
 	switch (event)
 	{
@@ -9098,6 +9232,28 @@ static gboolean on_scroll(GtkWidget *widget, GdkEventScroll *event, gpointer dat
 
 	if (hoverField)
 	{
+		if (!strcmp(hoverField->cmd, "spectrum") || !strcmp(hoverField->cmd, "waterfall")) {
+			const struct panadapter_view previous = panadapter_view;
+			double delta_x = 0.0;
+			double delta_y = 0.0;
+			if (!gdk_event_get_scroll_deltas((GdkEvent *)event, &delta_x, &delta_y)) {
+				if (event->direction == GDK_SCROLL_UP) delta_y = -1.0;
+				if (event->direction == GDK_SCROLL_DOWN) delta_y = 1.0;
+				if (event->direction == GDK_SCROLL_LEFT) delta_x = -1.0;
+				if (event->direction == GDK_SCROLL_RIGHT) delta_x = 1.0;
+			}
+			if (fabs(delta_y) > 0.001) {
+				const double position = (event->x - hoverField->x) / hoverField->width;
+				panadapter_view_zoom_at(&panadapter_view, pow(1.25, -delta_y), position);
+			}
+			if (fabs(delta_x) > 0.001)
+				panadapter_view_pan(&panadapter_view, delta_x * 0.15);
+			if (fabs(previous.zoom - panadapter_view.zoom) > 0.001
+				|| fabs(previous.center - panadapter_view.center) > 0.0001)
+				panadapter_view_refresh();
+			return TRUE;
+		}
+
 		const bool reverse = !strcmp(get_field("reverse_scrolling")->value, "ON");
 		//printf("scroll @%lf, %lf; direction %d reverse? %d field %s\n", event->x, event->y, event->direction, reverse, hoverField->label);
 		if (event->direction == 0)
@@ -9115,6 +9271,60 @@ static gboolean on_scroll(GtkWidget *widget, GdkEventScroll *event, gpointer dat
 				edit_field(hoverField, MIN_KEY_DOWN);
 		}
 	}
+	return FALSE;
+}
+
+static bool point_is_in_panadapter(double x, double y)
+{
+	struct field *spectrum = get_field("spectrum");
+	struct field *waterfall = get_field("waterfall");
+	return (x >= spectrum->x && x < spectrum->x + spectrum->width
+			&& y >= spectrum->y && y < spectrum->y + spectrum->height)
+		|| (x >= waterfall->x && x < waterfall->x + waterfall->width
+			&& y >= waterfall->y && y < waterfall->y + waterfall->height);
+}
+
+static void on_panadapter_touch_begin(GtkGesture *gesture,
+									 GdkEventSequence *sequence, gpointer data)
+{
+	double x, y;
+	panadapter_touch_active = gtk_gesture_get_bounding_box_center(gesture, &x, &y)
+		&& point_is_in_panadapter(x, y);
+	if (!panadapter_touch_active) {
+		gtk_gesture_set_state(gesture, GTK_EVENT_SEQUENCE_DENIED);
+		return;
+	}
+
+	struct field *spectrum = get_field("spectrum");
+	touch_start_view = panadapter_view;
+	touch_start_x = (x - spectrum->x) / spectrum->width;
+}
+
+static void on_panadapter_touch_update(GtkGesture *gesture,
+									  GdkEventSequence *sequence, gpointer data)
+{
+	if (!panadapter_touch_active)
+		return;
+	double x, y;
+	if (!gtk_gesture_get_bounding_box_center(gesture, &x, &y))
+		return;
+
+	struct field *spectrum = get_field("spectrum");
+	const double current_x = (x - spectrum->x) / spectrum->width;
+	const struct panadapter_view previous = panadapter_view;
+	panadapter_view = touch_start_view;
+	panadapter_view_zoom_at(&panadapter_view,
+		gtk_gesture_zoom_get_scale_delta(GTK_GESTURE_ZOOM(gesture)), touch_start_x);
+	panadapter_view_pan(&panadapter_view, touch_start_x - current_x);
+	if (fabs(previous.zoom - panadapter_view.zoom) > 0.001
+		|| fabs(previous.center - panadapter_view.center) > 0.0001)
+		panadapter_view_refresh();
+}
+
+static void on_panadapter_touch_end(GtkGesture *gesture,
+								   GdkEventSequence *sequence, gpointer data)
+{
+	panadapter_touch_active = false;
 }
 
 static gboolean on_window_state(GtkWidget *widget, GdkEventWindowState *event, gpointer user_data)
@@ -10537,12 +10747,26 @@ void ui_init(int argc, char *argv[])
 	g_signal_connect(G_OBJECT(display_area), "motion_notify_event", G_CALLBACK(on_mouse_move), NULL);
 	g_signal_connect(G_OBJECT(display_area), "scroll_event", G_CALLBACK(on_scroll), NULL);
 	g_signal_connect(G_OBJECT(window), "configure_event", G_CALLBACK(on_resize), NULL);
+	panadapter_touch_gesture = gtk_gesture_zoom_new(display_area);
+	gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(panadapter_touch_gesture),
+		GTK_PHASE_CAPTURE);
+	g_signal_connect(panadapter_touch_gesture, "begin",
+		G_CALLBACK(on_panadapter_touch_begin), NULL);
+	g_signal_connect(panadapter_touch_gesture, "update",
+		G_CALLBACK(on_panadapter_touch_update), NULL);
+	g_signal_connect(panadapter_touch_gesture, "end",
+		G_CALLBACK(on_panadapter_touch_end), NULL);
+	g_signal_connect(panadapter_touch_gesture, "cancel",
+		G_CALLBACK(on_panadapter_touch_end), NULL);
 
 	/* Ask to receive events the drawing area doesn't normally
 	 * subscribe to. In particular, we need to ask for the
 	 * button press and motion notify events that want to handle.
 	 */
-	gtk_widget_set_events(display_area, gtk_widget_get_events(display_area) | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_SCROLL_MASK | GDK_POINTER_MOTION_MASK);
+	gtk_widget_set_events(display_area, gtk_widget_get_events(display_area)
+		| GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_SCROLL_MASK
+		| GDK_SMOOTH_SCROLL_MASK | GDK_POINTER_MOTION_MASK | GDK_TOUCH_MASK
+		| GDK_TOUCHPAD_GESTURE_MASK);
 
 	gtk_widget_show_all(window);
 	layout_ui();
