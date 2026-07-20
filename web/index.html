@@ -359,17 +359,6 @@
                     <option value="ON">ON</option>
                 </select>
             </div>
-            <div class="sbitxv3-control">
-                <label class="sbitxv3-label" for="SPAN">SPAN</label>
-                <select class="sbitxv3-selection sbitx-selection" id="SPAN">
-                    <option value="PASS">PASS</option>
-                    <option value="25K">25K</option>
-                    <option value="10K">10K</option>
-                    <option value="8K">8K</option>
-                    <option value="6K">6K</option>
-                    <option value="2.5K">2.5K</option>
-                </select>
-            </div>
             <div class="linear cw-ft8-control" id="linear_SIDETONE">
                 <label class="linear-label" for="SIDETONE">SIDETN</label>
                 <input type="number" id="SIDETONE" min="0" max="100" class="linear-value">
@@ -1576,25 +1565,10 @@
 
     var waterfall_image = null;
 
-    function spectrumUsesPassband() {
-        return el("SPAN").value === "PASS";
-    }
-
-    function spectrumIsReversed() {
-        const mode = el("MODE").value;
-        return mode === "LSB" || mode === "CWR";
-    }
-
-    function spectrumSpanHz() {
-        const span = spectrumUsesPassband()
-            ? parseFloat(el("HIGH").value)
-            : parseFloat(el("SPAN").value) * 1000;
-        return Number.isFinite(span) ? Math.max(1, span) : 1;
-    }
+    const PANADAPTER_BANDWIDTH_HZ = 25000;
 
     function spectrumTunedX(width) {
-        if (!spectrumUsesPassband()) return width / 2;
-        return spectrumIsReversed() ? width - 1 : 0;
+        return width / 2;
     }
 
     function waterfall_init() {
@@ -1620,10 +1594,8 @@
         let w = rect.width;
         console.log("waterfall click " + x + ", " + w);
         let freq = parseInt(el('FREQ').value);
-        const span = spectrumSpanHz();
-        const start = spectrumUsesPassband()
-            ? (spectrumIsReversed() ? freq - span : freq)
-            : freq - span / 2;
+        const span = PANADAPTER_BANDWIDTH_HZ;
+        const start = freq - span / 2;
         freq = Math.round((start + (span / w) * x) / 100) * 100;
         console.log("waterfall freq " + freq);
         update_freq(freq);
@@ -1677,7 +1649,7 @@
         const drawHeight = height - 15;
 
         // Calculate filter edge positions directly
-        const calculated_span = spectrumSpanHz();
+        const calculated_span = PANADAPTER_BANDWIDTH_HZ;
         const hz_per_pixel = width / calculated_span;
         const tuned_x = spectrumTunedX(width);
 
@@ -1757,7 +1729,7 @@
         const adjustedDelta = deltaX * scaleX;
 
         const { width } = canvas;
-        const calculated_span = spectrumSpanHz();
+        const calculated_span = PANADAPTER_BANDWIDTH_HZ;
         const hz_per_pixel = width / calculated_span;
 
         // Get current filter values
@@ -1901,7 +1873,7 @@
             const spectrumCanvas = el("spectrum");
             const { width, height } = spectrumCanvas;
             const drawHeight = height - 15;
-            const calculated_span = spectrumSpanHz();
+            const calculated_span = PANADAPTER_BANDWIDTH_HZ;
             const hz_per_pixel = width / calculated_span;
             const tuned_x = spectrumTunedX(width);
 
@@ -2289,7 +2261,7 @@
         const nbins = update.length - 3;
         const scale = width / nbins;
         const drawHeight = height - 15; // Keep original height allocation
-        const calculated_span = spectrumSpanHz();
+        const calculated_span = PANADAPTER_BANDWIDTH_HZ;
         const hz_per_pixel = width / calculated_span;
         const tuned_x = spectrumTunedX(width);
 
@@ -2639,7 +2611,7 @@
         const ctx = waterfallEl.getContext("2d", { willReadFrequently: true });
         const nbins = update.length - 3;
         const scale = nbins / width;
-        const calculated_span = spectrumSpanHz();
+        const calculated_span = PANADAPTER_BANDWIDTH_HZ;
         const hz_per_pixel = width / calculated_span;
         const tuned_x = spectrumTunedX(width);
 

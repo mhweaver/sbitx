@@ -297,12 +297,6 @@ is open. They cover the most frequently adjusted operating parameters.
   them in without moving your TX frequency. The split is shown on the display.
   Turn RIT off to return RX to the main VFO frequency.
 
-* SPAN [2.5K | 6K | 8K | 10K | 25K]
-  Sets the frequency span of the panadapter (spectrum display).
-  Narrower spans show more detail around your current frequency.
-  Wider spans let you see more of the band at once to spot activity.
-  Recommended: 10K for general SSB, 2.5K for CW contesting, 25K for band survey.
-
 * SPLIT [on|off]
   Split frequency operation. When ON, the radio receives on VFO-A and transmits
   on VFO-B. This is standard practice for working DX stations that listen

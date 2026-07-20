@@ -42,6 +42,14 @@ void panadapter_view_pan(struct panadapter_view *view, double visible_fraction) 
   clamp_view(view);
 }
 
+void panadapter_view_fit(struct panadapter_view *view, double start, double stop) {
+  if (stop <= start)
+    return;
+  view->zoom = 1.0 / (stop - start);
+  view->center = (start + stop) / 2.0 - 0.5;
+  clamp_view(view);
+}
+
 double panadapter_view_map_position(const struct panadapter_view *old_view,
                                     const struct panadapter_view *new_view,
                                     double new_position) {
