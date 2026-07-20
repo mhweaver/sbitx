@@ -1059,12 +1059,12 @@ struct field main_controls[] = {
 	{"r1:high", NULL, 580, -350, 50, 50, "HIGH", 40, "5000", FIELD_NUMBER, STYLE_FIELD_VALUE,
 	 "", 50, 5000, 50, 0, DIGITAL_CONTROL},
 
-	{"spectrum", do_spectrum, 400, 101, 400, 100, "SPECTRUM", 70, "7000 KHz", FIELD_STATIC, STYLE_SMALL,
+	{"spectrum", do_spectrum, 400, 101, 400, 100, "SPECTRUM", 70, "", FIELD_STATIC, STYLE_SMALL,
 	 "", 0, 0, 0, COMMON_CONTROL},
-	{"#status", do_status, -1000, -1000, 400, 29, "STATUS", 70, "7000 KHz", FIELD_STATIC, STYLE_SMALL,
+	{"#status", do_status, -1000, -1000, 400, 29, "STATUS", 70, "", FIELD_STATIC, STYLE_SMALL,
 	 "status", 0, 0, 0, 0},
 
-	{"waterfall", do_waterfall, 400, 201, 400, 99, "WATERFALL", 70, "7000 KHz", FIELD_STATIC, STYLE_SMALL,
+	{"waterfall", do_waterfall, 400, 201, 400, 99, "WATERFALL", 70, "", FIELD_STATIC, STYLE_SMALL,
 	 "", 0, 0, 0, COMMON_CONTROL},
 	{"#console", do_console, 0, 100, 400, 200, "CONSOLE", 70, "console box", FIELD_CONSOLE, STYLE_LOG,
 	 "nothing valuable", 0, 0, 0, COMMON_CONTROL},
@@ -1527,6 +1527,8 @@ int set_field(const char *id, const char *value)
 		printf("*Error: field[%s] not found. Check for typo?\n", id);
 		return 1;
 	}
+	if (f->value_type == FIELD_STATIC)
+		return 0;
 
 	if (f->value_type == FIELD_NUMBER)
 	{
@@ -1696,6 +1698,8 @@ int remote_update_field(int i, char *text)
 				tmp->tm_year + 1900, tmp->tm_mon + 1, tmp->tm_mday, tmp->tm_hour, tmp->tm_min, tmp->tm_sec);
 		return 1;
 	}
+	if (f->value_type == FIELD_STATIC)
+		return 0;
 
 	strcpy(text, f->label);
 	strcat(text, " ");
@@ -2551,7 +2555,8 @@ void save_user_settings(int forced)
 		// Skip #band and #band_stack_pos - these are computed fields, not saved
 		// The band stack index is saved per-band in the [80M], [40M], etc. sections
 		// #mute is a momentary UI state that should always start OFF. - added mute control
-		if (!strcmp(active_layout[i].cmd, "#band") || 
+		if (active_layout[i].value_type == FIELD_STATIC ||
+			!strcmp(active_layout[i].cmd, "#band") || 
 			!strcmp(active_layout[i].cmd, "#band_stack_pos") ||
 			!strcmp(active_layout[i].cmd, "#mute") ||
 			!strcmp(active_layout[i].cmd, "#ftx_auto"))
@@ -5705,6 +5710,8 @@ static void hover_field(struct field *f)
 static void edit_field(struct field *f, int action)
 {
 	int v;
+	if (f->value_type == FIELD_STATIC)
+		return;
 	if (f == f_focus)
 		focus_since = millis();
 
