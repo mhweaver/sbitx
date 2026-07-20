@@ -2484,6 +2484,7 @@ struct spectrum_display_frame {
 	int span_hz;
 	int center_hz;
 	int mode;
+	uint64_t sample_end;
 };
 
 static int spectrum_refresh_interval_ms(int mode)
@@ -2493,14 +2494,14 @@ static int spectrum_refresh_interval_ms(int mode)
 	return MAX(1, MIN(interval, 500));
 }
 
-static void spectrum_display_frame_get(struct spectrum_display_frame *frame)
+static struct panadapter_fft_config spectrum_fft_config(void)
 {
 	const int span_hz = spectrum_display_span_hz();
 	const int mode = mode_id(get_field("r1:mode")->value);
 	const int center_hz = panadapter_view_center_hz(&panadapter_view,
 		PANADAPTER_FULL_SPAN_HZ);
 	const struct field *const spectrum = get_field("spectrum");
-	const struct panadapter_fft_config config = {
+	return (struct panadapter_fft_config) {
 		.display_span_hz = span_hz,
 		.center_hz = center_hz,
 		.is_cw = mode == MODE_CW || mode == MODE_CWR,
@@ -2509,6 +2510,14 @@ static void spectrum_display_frame_get(struct spectrum_display_frame *frame)
 		.refresh_ms = spectrum_refresh_interval_ms(mode),
 		.display_width_px = MAX(1, spectrum->width),
 	};
+}
+
+static void spectrum_display_frame_get(struct spectrum_display_frame *frame)
+{
+	const struct panadapter_fft_config config = spectrum_fft_config();
+	const int span_hz = config.display_span_hz;
+	const int center_hz = config.center_hz;
+	const int mode = mode_id(get_field("r1:mode")->value);
 	struct panadapter_fft_frame panadapter;
 	panadapter_fft_request(panadapter_fft_context, &config);
 	if (panadapter_fft_get_frame(panadapter_fft_context, &config, &panadapter)) {
@@ -2521,6 +2530,7 @@ static void spectrum_display_frame_get(struct spectrum_display_frame *frame)
 		frame->span_hz = span_hz;
 		frame->center_hz = center_hz;
 		frame->mode = mode;
+		frame->sample_end = panadapter.sample_end;
 		return;
 	}
 
@@ -2533,6 +2543,7 @@ static void spectrum_display_frame_get(struct spectrum_display_frame *frame)
 		.span_hz = span_hz,
 		.center_hz = center_hz,
 		.mode = mode,
+		.sample_end = 0,
 	};
 }
 
@@ -3449,6 +3460,28 @@ static int *wf = NULL;
 GdkPixbuf *waterfall_pixbuf = NULL;
 guint8 *waterfall_map = NULL;
 static bool waterfall_dragging;
+static uint64_t waterfall_live_sample_end;
+static float waterfall_color_offset;
+static guint waterfall_history_timer;
+
+struct waterfall_history_row {
+	uint64_t sample_end;
+	uint64_t view_generation;
+};
+
+static struct waterfall_history_row *waterfall_history_rows;
+static int waterfall_history_row_count;
+static uint64_t waterfall_view_generation = 1;
+static uint64_t waterfall_request_token;
+static struct panadapter_fft_config waterfall_history_config;
+static struct {
+	bool active;
+	uint64_t token;
+	uint64_t sample_end;
+	uint64_t view_generation;
+} waterfall_history_request;
+
+static void waterfall_history_start(void);
 
 enum panadapter_control {
 	PANADAPTER_ZOOM_OUT,
@@ -3505,6 +3538,11 @@ static void remap_waterfall(const struct panadapter_view *old_view,
 static void panadapter_view_refresh(const struct panadapter_view *previous)
 {
 	remap_waterfall(previous, &panadapter_view);
+	waterfall_view_generation++;
+	if (!waterfall_view_generation)
+		waterfall_view_generation++;
+	waterfall_history_config = spectrum_fft_config();
+	waterfall_history_start();
 	panadapter_fft_reset(panadapter_fft_context);
 	struct field *spectrum = get_field("spectrum");
 	struct field *waterfall = get_field("waterfall");
@@ -3744,6 +3782,10 @@ void init_waterfall()
 	{
 		free(waterfall_map);
 	}
+	free(waterfall_history_rows);
+	waterfall_history_rows = calloc(f->height, sizeof(*waterfall_history_rows));
+	waterfall_history_row_count = waterfall_history_rows ? f->height : 0;
+	waterfall_history_request.active = false;
 	// Allocate memory for waterfall_map buffer
 	waterfall_map = malloc(f->width * f->height * 3);
 	if (!waterfall_map)
@@ -3774,6 +3816,126 @@ void init_waterfall()
 	// format,         alpha?, bit,  width,    height, rowstride, destroyfn, data
 
 	//	printf("%ld return from pixbuff", (int)waterfall_pixbuf);
+}
+
+static void waterfall_color_pixel(float value, float min_db, float max_db,
+								  float offset, guint8 *pixel)
+{
+	float normalized;
+	if (!strcmp(field_str("AUTOSCOPE"), "ON") && !in_tx)
+		normalized = (value * 2.4f - offset) / (max_db - offset) * 100.0f;
+	else
+		normalized = (value * 2.4f - min_db) / (max_db - min_db) * 100.0f;
+	normalized = MAX(0.0f, MIN(100.0f, normalized));
+
+	const int v = (int)normalized;
+	float wr, wg, wb;
+	if (v < 34) {
+		const float t = v / 33.0f;
+		wr = palette[WATERFALL_LOW][0] * t;
+		wg = palette[WATERFALL_LOW][1] * t;
+		wb = palette[WATERFALL_LOW][2] * t;
+	} else if (v < 67) {
+		const float t = (v - 33) / 34.0f;
+		wr = palette[WATERFALL_LOW][0] + (palette[WATERFALL_MID][0] - palette[WATERFALL_LOW][0]) * t;
+		wg = palette[WATERFALL_LOW][1] + (palette[WATERFALL_MID][1] - palette[WATERFALL_LOW][1]) * t;
+		wb = palette[WATERFALL_LOW][2] + (palette[WATERFALL_MID][2] - palette[WATERFALL_LOW][2]) * t;
+	} else {
+		const float t = (v - 67) / 33.0f;
+		wr = palette[WATERFALL_MID][0] + (palette[WATERFALL_HIGH][0] - palette[WATERFALL_MID][0]) * t;
+		wg = palette[WATERFALL_MID][1] + (palette[WATERFALL_HIGH][1] - palette[WATERFALL_MID][1]) * t;
+		wb = palette[WATERFALL_MID][2] + (palette[WATERFALL_HIGH][2] - palette[WATERFALL_MID][2]) * t;
+	}
+	pixel[0] = (guint8)(wr * 255);
+	pixel[1] = (guint8)(wg * 255);
+	pixel[2] = (guint8)(wb * 255);
+}
+
+static void waterfall_render_history_row(struct field *f, int row,
+									 const struct panadapter_fft_frame *frame,
+									 float min_db, float max_db, float offset)
+{
+	const struct field *spectrum = get_field("spectrum");
+	const int grid_height = spectrum->height -
+		(font_table[STYLE_SMALL].height * 4 / 3);
+	if (frame->count < 1 || grid_height < 1)
+		return;
+	for (int x = 0; x < f->width; x++) {
+		const int bin = (f->width - 1 - x) * frame->count / f->width;
+		int y = ((frame->bins[bin] + waterfall_offset) * spectrum->height) / 80;
+		y = MAX(0, MIN(spectrum->height - 1, y));
+		waterfall_color_pixel((y * 100) / grid_height, min_db, max_db,
+			offset, waterfall_map + ((size_t)row * f->width + x) * 3);
+	}
+}
+
+static bool waterfall_history_update(struct field *f, float min_db,
+									  float max_db, float offset)
+{
+	if (!waterfall_history_rows || waterfall_history_row_count != f->height)
+		return false;
+
+	if (waterfall_history_request.active) {
+		struct panadapter_fft_frame frame;
+		if (panadapter_fft_get_history_frame(panadapter_fft_context,
+				waterfall_history_request.token, &frame)) {
+			if (waterfall_history_request.view_generation == waterfall_view_generation) {
+				for (int row = 0; row < f->height; row++) {
+					if (waterfall_history_rows[row].sample_end !=
+						waterfall_history_request.sample_end ||
+						waterfall_history_rows[row].view_generation ==
+						waterfall_view_generation)
+						continue;
+					if (frame.count > 0)
+						waterfall_render_history_row(f, row, &frame,
+							min_db, max_db, offset);
+					waterfall_history_rows[row].view_generation =
+						waterfall_view_generation;
+				}
+			}
+			waterfall_history_request.active = false;
+		}
+	}
+
+	if (waterfall_dragging || waterfall_history_request.active)
+		return true;
+	for (int row = 0; row < f->height; row++) {
+		if (!waterfall_history_rows[row].sample_end ||
+			waterfall_history_rows[row].view_generation == waterfall_view_generation)
+			continue;
+		const uint64_t token = ++waterfall_request_token;
+		if (!token || !panadapter_fft_request_history(panadapter_fft_context,
+				&waterfall_history_config,
+				waterfall_history_rows[row].sample_end, token))
+			return true;
+		waterfall_history_request = (typeof(waterfall_history_request)) {
+			.active = true,
+			.token = token,
+			.sample_end = waterfall_history_rows[row].sample_end,
+			.view_generation = waterfall_view_generation,
+		};
+		return true;
+	}
+	return false;
+}
+
+static gboolean waterfall_history_tick(gpointer unused)
+{
+	(void)unused;
+	struct field *f = get_field("waterfall");
+	const bool pending = waterfall_history_update(f,
+		(wf_min - 1.0f) * 100.0f, 100.0f * wf_max,
+		waterfall_color_offset);
+	if (pending)
+		return G_SOURCE_CONTINUE;
+	waterfall_history_timer = 0;
+	return G_SOURCE_REMOVE;
+}
+
+static void waterfall_history_start(void)
+{
+	if (!waterfall_history_timer)
+		waterfall_history_timer = g_timeout_add(10, waterfall_history_tick, NULL);
 }
 
 void draw_tx_meters(struct field *f, cairo_t *gfx)
@@ -3883,64 +4045,25 @@ void draw_waterfall(struct field *f, cairo_t *gfx)
 	// Scroll the existing waterfall data down
 	memmove(waterfall_map + f->width * 3, waterfall_map,
 			f->width * (f->height - 1) * 3);
-
-	int index = 0;
-	static float wf_offset = 0;
-	for (int i = 0; i < f->width; i++)
-	{
-		// Scale the input value (original behavior restored)
-		float scaled_value = wf[i] * 2.4;
-
-		// Normalize data to the range [0, 100] based on adjusted min/max
-		float normalized = 0;
-
-		if (!strcmp(field_str("AUTOSCOPE"), "ON")&& !in_tx) {
-			normalized = (scaled_value - wf_offset) / (max_db - wf_offset) * 100.0f;
-		} else {
-			normalized = (scaled_value - min_db) / (max_db - min_db) * 100.0f;
-			wf_offset = 0;
-		}
-
-		// Clamp normalized values to [0, 100]
-		if (normalized < 0)
-			normalized = 0;
-		else if (normalized > 100)
-			normalized = 100;
-
-		int v = (int)(normalized);
-
-		// Gradient mapping: black -> WATERFALL_LOW -> WATERFALL_MID -> WATERFALL_HIGH
-		float wr, wg, wb;
-		if (v < 34)
-		{ // black to WATERFALL_LOW
-			float t = v / 33.0;
-			wr = palette[WATERFALL_LOW][0] * t;
-			wg = palette[WATERFALL_LOW][1] * t;
-			wb = palette[WATERFALL_LOW][2] * t;
-		}
-		else if (v < 67)
-		{ // WATERFALL_LOW to WATERFALL_MID
-			float t = (v - 33) / 34.0;
-			wr = palette[WATERFALL_LOW][0] + (palette[WATERFALL_MID][0] - palette[WATERFALL_LOW][0]) * t;
-			wg = palette[WATERFALL_LOW][1] + (palette[WATERFALL_MID][1] - palette[WATERFALL_LOW][1]) * t;
-			wb = palette[WATERFALL_LOW][2] + (palette[WATERFALL_MID][2] - palette[WATERFALL_LOW][2]) * t;
-		}
-		else
-		{ // WATERFALL_MID to WATERFALL_HIGH
-			float t = (v - 67) / 33.0;
-			wr = palette[WATERFALL_MID][0] + (palette[WATERFALL_HIGH][0] - palette[WATERFALL_MID][0]) * t;
-			wg = palette[WATERFALL_MID][1] + (palette[WATERFALL_HIGH][1] - palette[WATERFALL_MID][1]) * t;
-			wb = palette[WATERFALL_MID][2] + (palette[WATERFALL_HIGH][2] - palette[WATERFALL_MID][2]) * t;
-		}
-		waterfall_map[index++] = (int)(wr * 255);
-		waterfall_map[index++] = (int)(wg * 255);
-		waterfall_map[index++] = (int)(wb * 255);
+	if (waterfall_history_rows && waterfall_history_row_count == f->height) {
+		memmove(waterfall_history_rows + 1, waterfall_history_rows,
+			(size_t)(f->height - 1) * sizeof(*waterfall_history_rows));
+		waterfall_history_rows[0] = (struct waterfall_history_row) {
+			.sample_end = waterfall_live_sample_end,
+			.view_generation = waterfall_view_generation,
+		};
 	}
+
+	if (strcmp(field_str("AUTOSCOPE"), "ON") || in_tx)
+		waterfall_color_offset = 0;
+	for (int i = 0; i < f->width; i++)
+		waterfall_color_pixel(wf[i], min_db, max_db, waterfall_color_offset,
+			waterfall_map + i * 3);
 
 	// Use the same baseline that had been calculated for the spectrum
 	// This gives good results as it's averaged, hence less noisy
 	// Smoothly adjust the waterfall offset
-	wf_offset += ((sp_baseline + 40)*2 - wf_offset) / 10;
+	waterfall_color_offset += ((sp_baseline + 40)*2 - waterfall_color_offset) / 10;
 
 	// Draw the updated waterfall
 	gdk_cairo_set_source_pixbuf(gfx, waterfall_pixbuf, f->x, f->y);
@@ -4715,6 +4838,7 @@ void draw_spectrum(struct field *f_spectrum, cairo_t *gfx)
 	struct spectrum_display_frame display_frame;
 	spectrum_display_frame_get(&display_frame);
 	spectrum_latency_ms = display_frame.latency_ms;
+	waterfall_live_sample_end = display_frame.sample_end;
 	prepare_spectrum_history(&display_frame);
 	int n_bins = display_frame.count;
 

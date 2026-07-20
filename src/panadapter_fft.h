@@ -28,6 +28,7 @@ struct panadapter_fft_frame {
   int decimation;
   int observation_samples;
   int fft_bins;
+  uint64_t sample_end;
   uint64_t sample_end_ms;
   uint64_t generation;
   struct panadapter_fft_config config;
@@ -42,6 +43,13 @@ void panadapter_fft_push(struct panadapter_fft *context, const double *i_samples
 void panadapter_fft_request(struct panadapter_fft *context, const struct panadapter_fft_config *config);
 
 bool panadapter_fft_get_frame(struct panadapter_fft *context, const struct panadapter_fft_config *config, struct panadapter_fft_frame *frame);
+
+bool panadapter_fft_request_history(struct panadapter_fft *context,
+  const struct panadapter_fft_config *config, uint64_t sample_end,
+  uint64_t generation);
+
+bool panadapter_fft_get_history_frame(struct panadapter_fft *context,
+  uint64_t generation, struct panadapter_fft_frame *frame);
 
 int panadapter_fft_frame_latency_ms(const struct panadapter_fft_frame *frame);
 
