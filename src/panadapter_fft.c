@@ -245,8 +245,9 @@ static bool analyze(struct panadapter_fft *state,
 	shift_samples(state, raw_count, config->center_hz, first_sample);
 	memset(state->fft_data, 0, sizeof(*state->fft_data) * fft_bins);
 
-	// Keep signal levels independent of FFT length, preserving 2048-bin levels.
-	const float length_scale = (float)FFT_LEVEL_REFERENCE_BINS / (float)observed;
+	/* Normalize FFT power so longer observations do not suppress the noise floor. */
+	const float length_scale = sqrtf((float)FFT_LEVEL_REFERENCE_BINS /
+		(float)observed);
 	for (int output = 0; output < observed; output++) {
 		const int newest = FILTER_TAPS - 1 + output * decimation;
 		fftwf_complex sum = 0.0f;
