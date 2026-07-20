@@ -3448,6 +3448,7 @@ static int waterfall_offset = 30;
 static int *wf = NULL;
 GdkPixbuf *waterfall_pixbuf = NULL;
 guint8 *waterfall_map = NULL;
+static bool waterfall_dragging;
 
 enum panadapter_control {
 	PANADAPTER_ZOOM_OUT,
@@ -6400,9 +6401,13 @@ int do_waterfall(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
 		invalidate_rect(0, 0, 800, 480);
 	}
 
-	if (event == GDK_BUTTON_PRESS && c == GDK_BUTTON_PRIMARY
-		&& activate_panadapter_control(f, a, b))
+	if (event == GDK_BUTTON_PRESS && c == GDK_BUTTON_PRIMARY) {
+		waterfall_dragging = false;
+		if (activate_panadapter_control(f, a, b))
+			return 1;
+		waterfall_dragging = true;
 		return 1;
+	}
 
 	switch (event)
 	{
@@ -6412,6 +6417,18 @@ int do_waterfall(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
 		cairo_clip(gfx);
 		draw_waterfall(f, gfx);
 		cairo_restore(gfx);
+		return 1;
+	case GDK_MOTION_NOTIFY:
+		if (!waterfall_dragging)
+			return 0;
+		const struct panadapter_view previous = panadapter_view;
+		panadapter_view_pan(&panadapter_view,
+			-(double)(a - last_mouse_x) / f->width);
+		if (fabs(previous.center - panadapter_view.center) > 0.0001)
+			panadapter_view_refresh(&previous);
+		return 1;
+	case GDK_BUTTON_RELEASE:
+		waterfall_dragging = false;
 		return 1;
 	}
 	return 0;
