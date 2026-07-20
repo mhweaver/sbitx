@@ -16,5 +16,8 @@ int panadapter_view_span_hz(const struct panadapter_view *view, int base_span_hz
 int panadapter_view_center_hz(const struct panadapter_view *view, int base_span_hz);
 void panadapter_view_zoom_at(struct panadapter_view *view, double factor, double position);
 void panadapter_view_pan(struct panadapter_view *view, double visible_fraction);
+double panadapter_view_map_position(const struct panadapter_view *old_view,
+                                    const struct panadapter_view *new_view,
+                                    double new_position);
 
 #endif

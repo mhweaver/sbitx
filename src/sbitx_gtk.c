@@ -251,9 +251,14 @@ static struct spectrum_history_state spectrum_history;
 static int spectrum_latency_ms = -1;
 static struct panadapter_view panadapter_view = {1.0, 0.0};
 static struct panadapter_view touch_start_view;
-static double touch_start_x;
+struct panadapter_touch_point {
+	GdkEventSequence *sequence;
+	double x;
+	double y;
+};
+static struct panadapter_touch_point panadapter_touches[2];
+static double touch_start_x, touch_start_distance;
 static bool panadapter_touch_active;
-static GtkGesture *panadapter_touch_gesture;
 
 #define MIN_WATERFALL_HEIGHT 10 // Define a minimum safe height
 #define WATERFALL_Y_OFFSET 2   // Pixels to move waterfall up from spectrum bottom
@@ -3459,25 +3464,73 @@ GdkPixbuf *waterfall_pixbuf = NULL;
 guint8 *waterfall_map = NULL;
 
 enum panadapter_control {
-	PANADAPTER_RESET,
-	PANADAPTER_LEFT,
-	PANADAPTER_RIGHT,
 	PANADAPTER_ZOOM_OUT,
 	PANADAPTER_ZOOM_IN,
+	PANADAPTER_LEFT,
+	PANADAPTER_RIGHT,
+	PANADAPTER_RESET,
 	PANADAPTER_CONTROL_COUNT,
 };
 
-static void panadapter_view_refresh(void)
+static void remap_waterfall(const struct panadapter_view *old_view,
+							const struct panadapter_view *new_view)
 {
-	if (waterfall_map) {
-		struct field *waterfall = get_field("waterfall");
-		memset(waterfall_map, 0, waterfall->width * waterfall->height * 3);
+	if (!waterfall_map)
+		return;
+	struct field *waterfall = get_field("waterfall");
+	const int width = waterfall->width;
+	const int height = waterfall->height;
+	if (width < 1 || height < 1)
+		return;
+	const size_t bytes = (size_t)width * height * 3;
+	guint8 *previous = malloc(bytes);
+	if (!previous) {
+		memset(waterfall_map, 0, bytes);
+		return;
 	}
+	memcpy(previous, waterfall_map, bytes);
+
+	for (int y = 0; y < height; y++) {
+		for (int x = 0; x < width; x++) {
+			const double position = (x + 0.5) / width;
+			double old_x = panadapter_view_map_position(old_view, new_view, position)
+				* width - 0.5;
+			guint8 *pixel = waterfall_map + ((size_t)y * width + x) * 3;
+			if (old_x < -0.5 || old_x > width - 0.5) {
+				memset(pixel, 0, 3);
+				continue;
+			}
+			old_x = MAX(0.0, MIN(width - 1.0, old_x));
+			const int left = (int)floor(old_x);
+			const int right = MIN(width - 1, left + 1);
+			const double mix = old_x - left;
+			const guint8 *left_pixel = previous + ((size_t)y * width + left) * 3;
+			const guint8 *right_pixel = previous + ((size_t)y * width + right) * 3;
+			for (int channel = 0; channel < 3; channel++)
+				pixel[channel] = (guint8)lround(left_pixel[channel] * (1.0 - mix)
+					+ right_pixel[channel] * mix);
+		}
+	}
+	free(previous);
+}
+
+static void panadapter_view_refresh(const struct panadapter_view *previous)
+{
+	remap_waterfall(previous, &panadapter_view);
 	panadapter_fft_reset(panadapter_fft_context);
 	struct field *spectrum = get_field("spectrum");
 	struct field *waterfall = get_field("waterfall");
 	invalidate_rect(spectrum->x, spectrum->y, spectrum->width, spectrum->height);
 	invalidate_rect(waterfall->x, waterfall->y, waterfall->width, waterfall->height);
+}
+
+static bool panadapter_control_enabled(int control)
+{
+	if (control == PANADAPTER_ZOOM_OUT)
+		return panadapter_view.zoom > 1.0 + 1.0e-6;
+	if (control == PANADAPTER_ZOOM_IN)
+		return panadapter_view.zoom < PANADAPTER_VIEW_MAX_ZOOM - 1.0e-6;
+	return true;
 }
 
 static void panadapter_control_rect(const struct field *f, int control,
@@ -3499,18 +3552,25 @@ static void draw_panadapter_control(struct field *f, cairo_t *gfx, int control)
 	cairo_set_source_rgba(gfx, 0.05, 0.05, 0.05, 0.82);
 	cairo_rectangle(gfx, x, y, size, size);
 	cairo_fill_preserve(gfx);
-	cairo_set_source_rgba(gfx, 1.0, 1.0, 1.0, 0.85);
+	const bool enabled = panadapter_control_enabled(control);
+	cairo_set_source_rgba(gfx, 1.0, 1.0, 1.0, enabled ? 0.85 : 0.28);
 	cairo_set_line_width(gfx, MAX(1.5, size / 16.0));
+	cairo_set_line_cap(gfx, CAIRO_LINE_CAP_ROUND);
+	cairo_set_line_join(gfx, CAIRO_LINE_JOIN_ROUND);
 	cairo_stroke(gfx);
 
 	if (control == PANADAPTER_LEFT || control == PANADAPTER_RIGHT) {
 		const double direction = control == PANADAPTER_LEFT ? -1.0 : 1.0;
-		cairo_move_to(gfx, cx + direction * size * 0.22, cy - size * 0.22);
-		cairo_line_to(gfx, cx - direction * size * 0.06, cy);
-		cairo_line_to(gfx, cx + direction * size * 0.22, cy + size * 0.22);
-		cairo_move_to(gfx, cx - direction * size * 0.06, cy);
-		cairo_line_to(gfx, cx - direction * size * 0.25, cy);
+		const double tip = cx + direction * size * 0.27;
+		const double base = cx + direction * size * 0.02;
+		cairo_move_to(gfx, cx - direction * size * 0.25, cy);
+		cairo_line_to(gfx, tip, cy);
 		cairo_stroke(gfx);
+		cairo_move_to(gfx, tip, cy);
+		cairo_line_to(gfx, base, cy - size * 0.22);
+		cairo_line_to(gfx, base, cy + size * 0.22);
+		cairo_close_path(gfx);
+		cairo_fill(gfx);
 	} else if (control == PANADAPTER_ZOOM_OUT || control == PANADAPTER_ZOOM_IN) {
 		const double radius = size * 0.20;
 		cairo_arc(gfx, cx - size * 0.07, cy - size * 0.07, radius, 0, 2 * M_PI);
@@ -3524,11 +3584,15 @@ static void draw_panadapter_control(struct field *f, cairo_t *gfx, int control)
 		}
 		cairo_stroke(gfx);
 	} else {
-		cairo_arc(gfx, cx, cy, size * 0.23, -0.3, 1.7 * M_PI);
+		const double radius = size * 0.23;
+		const double end = 1.75 * M_PI;
+		cairo_arc(gfx, cx, cy, radius, 0.25 * M_PI, end);
 		cairo_stroke(gfx);
-		cairo_move_to(gfx, cx + size * 0.22, cy - size * 0.12);
-		cairo_line_to(gfx, cx + size * 0.31, cy - size * 0.27);
-		cairo_line_to(gfx, cx + size * 0.10, cy - size * 0.25);
+		const double tip_x = cx + radius * cos(end) + size * 0.07;
+		const double tip_y = cy + radius * sin(end) + size * 0.07;
+		cairo_move_to(gfx, tip_x, tip_y);
+		cairo_line_to(gfx, tip_x - size * 0.20, tip_y - size * 0.02);
+		cairo_line_to(gfx, tip_x - size * 0.02, tip_y - size * 0.20);
 		cairo_close_path(gfx);
 		cairo_fill(gfx);
 	}
@@ -3554,6 +3618,8 @@ static bool activate_panadapter_control(struct field *f, int pointer_x, int poin
 			continue;
 
 		const struct panadapter_view previous = panadapter_view;
+		if (!panadapter_control_enabled(control))
+			return true;
 		if (control == PANADAPTER_RESET)
 			panadapter_view_reset(&panadapter_view);
 		else if (control == PANADAPTER_LEFT)
@@ -3565,7 +3631,7 @@ static bool activate_panadapter_control(struct field *f, int pointer_x, int poin
 				control == PANADAPTER_ZOOM_IN ? 1.25 : 0.8, 0.5);
 		if (fabs(previous.zoom - panadapter_view.zoom) > 0.001
 			|| fabs(previous.center - panadapter_view.center) > 0.0001)
-			panadapter_view_refresh();
+			panadapter_view_refresh(&previous);
 		return true;
 	}
 	return false;
@@ -9250,7 +9316,7 @@ static gboolean on_scroll(GtkWidget *widget, GdkEventScroll *event, gpointer dat
 				panadapter_view_pan(&panadapter_view, delta_x * 0.15);
 			if (fabs(previous.zoom - panadapter_view.zoom) > 0.001
 				|| fabs(previous.center - panadapter_view.center) > 0.0001)
-				panadapter_view_refresh();
+				panadapter_view_refresh(&previous);
 			return TRUE;
 		}
 
@@ -9284,47 +9350,82 @@ static bool point_is_in_panadapter(double x, double y)
 			&& y >= waterfall->y && y < waterfall->y + waterfall->height);
 }
 
-static void on_panadapter_touch_begin(GtkGesture *gesture,
-									 GdkEventSequence *sequence, gpointer data)
+static int panadapter_touch_slot(GdkEventSequence *sequence)
 {
-	double x, y;
-	panadapter_touch_active = gtk_gesture_get_bounding_box_center(gesture, &x, &y)
-		&& point_is_in_panadapter(x, y);
-	if (!panadapter_touch_active) {
-		gtk_gesture_set_state(gesture, GTK_EVENT_SEQUENCE_DENIED);
-		return;
-	}
-
-	struct field *spectrum = get_field("spectrum");
-	touch_start_view = panadapter_view;
-	touch_start_x = (x - spectrum->x) / spectrum->width;
+	for (int i = 0; i < 2; i++)
+		if (panadapter_touches[i].sequence == sequence)
+			return i;
+	return -1;
 }
 
-static void on_panadapter_touch_update(GtkGesture *gesture,
-									  GdkEventSequence *sequence, gpointer data)
+static int panadapter_touch_count(void)
 {
-	if (!panadapter_touch_active)
-		return;
-	double x, y;
-	if (!gtk_gesture_get_bounding_box_center(gesture, &x, &y))
-		return;
+	return !!panadapter_touches[0].sequence + !!panadapter_touches[1].sequence;
+}
+
+static gboolean on_panadapter_touch(GtkWidget *widget, GdkEventTouch *event, gpointer data)
+{
+	int slot = panadapter_touch_slot(event->sequence);
+	if (event->type == GDK_TOUCH_BEGIN) {
+		if (!point_is_in_panadapter(event->x, event->y))
+			return FALSE;
+		if (slot < 0) {
+			for (int i = 0; i < 2; i++) {
+				if (!panadapter_touches[i].sequence) {
+					slot = i;
+					break;
+				}
+			}
+		}
+		if (slot < 0)
+			return panadapter_touch_active;
+		panadapter_touches[slot] = (struct panadapter_touch_point) {
+			.sequence = event->sequence, .x = event->x, .y = event->y,
+		};
+		if (panadapter_touch_count() == 2) {
+			struct field *spectrum = get_field("spectrum");
+			const double center_x = (panadapter_touches[0].x + panadapter_touches[1].x) / 2.0;
+			touch_start_x = (center_x - spectrum->x) / spectrum->width;
+			touch_start_distance = hypot(panadapter_touches[0].x - panadapter_touches[1].x,
+				panadapter_touches[0].y - panadapter_touches[1].y);
+			if (touch_start_distance < 1.0)
+				touch_start_distance = 1.0;
+			touch_start_view = panadapter_view;
+			panadapter_touch_active = true;
+			mouse_down = 0;
+		}
+		return panadapter_touch_active;
+	}
+
+	if (event->type == GDK_TOUCH_END || event->type == GDK_TOUCH_CANCEL) {
+		const bool handled = panadapter_touch_active;
+		if (slot >= 0)
+			panadapter_touches[slot].sequence = NULL;
+		if (panadapter_touch_count() < 2)
+			panadapter_touch_active = false;
+		return handled;
+	}
+
+	if (event->type != GDK_TOUCH_UPDATE || slot < 0)
+		return FALSE;
+	panadapter_touches[slot].x = event->x;
+	panadapter_touches[slot].y = event->y;
+	if (!panadapter_touch_active || panadapter_touch_count() != 2)
+		return FALSE;
 
 	struct field *spectrum = get_field("spectrum");
-	const double current_x = (x - spectrum->x) / spectrum->width;
+	const double center_x = (panadapter_touches[0].x + panadapter_touches[1].x) / 2.0;
+	const double current_x = (center_x - spectrum->x) / spectrum->width;
+	const double distance = hypot(panadapter_touches[0].x - panadapter_touches[1].x,
+		panadapter_touches[0].y - panadapter_touches[1].y);
 	const struct panadapter_view previous = panadapter_view;
 	panadapter_view = touch_start_view;
-	panadapter_view_zoom_at(&panadapter_view,
-		gtk_gesture_zoom_get_scale_delta(GTK_GESTURE_ZOOM(gesture)), touch_start_x);
+	panadapter_view_zoom_at(&panadapter_view, distance / touch_start_distance, touch_start_x);
 	panadapter_view_pan(&panadapter_view, touch_start_x - current_x);
 	if (fabs(previous.zoom - panadapter_view.zoom) > 0.001
 		|| fabs(previous.center - panadapter_view.center) > 0.0001)
-		panadapter_view_refresh();
-}
-
-static void on_panadapter_touch_end(GtkGesture *gesture,
-								   GdkEventSequence *sequence, gpointer data)
-{
-	panadapter_touch_active = false;
+		panadapter_view_refresh(&previous);
+	return TRUE;
 }
 
 static gboolean on_window_state(GtkWidget *widget, GdkEventWindowState *event, gpointer user_data)
@@ -9349,6 +9450,8 @@ static gboolean on_mouse_release(GtkWidget *widget, GdkEventButton *event, gpoin
 // This function is for drag tracking
 static gboolean on_mouse_move(GtkWidget *widget, GdkEventMotion *event, gpointer data)
 {
+	if (panadapter_touch_active)
+		return TRUE;
 	mouse_down = event->state & GDK_BUTTON1_MASK;
 	if (!mouse_down)
 		return false;
@@ -10746,18 +10849,8 @@ void ui_init(int argc, char *argv[])
 	g_signal_connect(G_OBJECT(window), "button_release_event", G_CALLBACK(on_mouse_release), NULL);
 	g_signal_connect(G_OBJECT(display_area), "motion_notify_event", G_CALLBACK(on_mouse_move), NULL);
 	g_signal_connect(G_OBJECT(display_area), "scroll_event", G_CALLBACK(on_scroll), NULL);
+	g_signal_connect(G_OBJECT(display_area), "touch_event", G_CALLBACK(on_panadapter_touch), NULL);
 	g_signal_connect(G_OBJECT(window), "configure_event", G_CALLBACK(on_resize), NULL);
-	panadapter_touch_gesture = gtk_gesture_zoom_new(display_area);
-	gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(panadapter_touch_gesture),
-		GTK_PHASE_CAPTURE);
-	g_signal_connect(panadapter_touch_gesture, "begin",
-		G_CALLBACK(on_panadapter_touch_begin), NULL);
-	g_signal_connect(panadapter_touch_gesture, "update",
-		G_CALLBACK(on_panadapter_touch_update), NULL);
-	g_signal_connect(panadapter_touch_gesture, "end",
-		G_CALLBACK(on_panadapter_touch_end), NULL);
-	g_signal_connect(panadapter_touch_gesture, "cancel",
-		G_CALLBACK(on_panadapter_touch_end), NULL);
 
 	/* Ask to receive events the drawing area doesn't normally
 	 * subscribe to. In particular, we need to ask for the
@@ -10765,8 +10858,7 @@ void ui_init(int argc, char *argv[])
 	 */
 	gtk_widget_set_events(display_area, gtk_widget_get_events(display_area)
 		| GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_SCROLL_MASK
-		| GDK_SMOOTH_SCROLL_MASK | GDK_POINTER_MOTION_MASK | GDK_TOUCH_MASK
-		| GDK_TOUCHPAD_GESTURE_MASK);
+		| GDK_SMOOTH_SCROLL_MASK | GDK_POINTER_MOTION_MASK | GDK_TOUCH_MASK);
 
 	gtk_widget_show_all(window);
 	layout_ui();

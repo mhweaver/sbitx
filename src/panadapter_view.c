@@ -41,3 +41,10 @@ void panadapter_view_pan(struct panadapter_view *view, double visible_fraction) 
   view->center += visible_fraction / view->zoom;
   clamp_view(view);
 }
+
+double panadapter_view_map_position(const struct panadapter_view *old_view,
+                                    const struct panadapter_view *new_view,
+                                    double new_position) {
+  const double frequency = new_view->center + (new_position - 0.5) / new_view->zoom;
+  return 0.5 + (frequency - old_view->center) * old_view->zoom;
+}
