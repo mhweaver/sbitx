@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define PANADAPTER_FFT_DEFAULT_BINS 2048
+#define PANADAPTER_FFT_MIN_BINS 1024
 #define PANADAPTER_FFT_MAX_BINS 16384
 #define PANADAPTER_FFT_FRAME_BINS 2048
 
@@ -17,7 +17,7 @@ struct panadapter_fft_config {
 	int is_tx;
 	int wpm;
 	int refresh_ms;
-	int fft_bins;
+	int display_width_px;
 };
 
 struct panadapter_fft_frame {
@@ -27,6 +27,7 @@ struct panadapter_fft_frame {
 	double bin_step_hz;
 	int decimation;
 	int observation_samples;
+	int fft_bins;
 	uint64_t sample_end_ms;
 	uint64_t generation;
 	struct panadapter_fft_config config;

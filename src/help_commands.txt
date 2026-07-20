@@ -530,13 +530,6 @@ the spectrum display, waterfall appearance, and advanced hardware options.
   Slower speeds spread signals out vertically and are easier to read.
   Default: 100. Recommended: 50-100 for SSB/CW, 100+ for digital modes.
 
-* WF_FFTBINS [1-16384, powers of two]
-  Sets the FFT size used by the scope and waterfall.
-  Larger values improve frequency detail but use more CPU and observation
-  time. At narrow spans, 16384 can observe more than one second of samples.
-  CW and CWR remain capped at one dit so Morse elements do not blend.
-  Default: 2048.
-
 #Mode-Specific Controls
 
 These controls only appear on the main display when a particular mode is active.

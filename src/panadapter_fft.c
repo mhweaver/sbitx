@@ -6,6 +6,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -23,6 +24,8 @@
 #define MAX_RAW_SAMPLES ((PANADAPTER_FFT_MAX_BINS - 1) * MAX_DECIMATION + FILTER_TAPS)
 #define RING_SIZE (PANADAPTER_FFT_MAX_BINS * (MAX_DECIMATION + 1))
 #define RING_INDEX_MASK (RING_SIZE - 1)
+/* Preserve the signal levels produced by the original 2048-bin display FFT. */
+#define FFT_LEVEL_REFERENCE_BINS 2048
 /* Blend 30% of each new non-CW spectrum into the displayed frame. */
 #define NON_CW_NEW_FRAME_WEIGHT 0.3f
 
@@ -64,7 +67,7 @@ static bool fft_configs_equal(const struct panadapter_fft_config *a,
 	       && a->center_hz == b->center_hz
 	       && a->is_cw == b->is_cw
 	       && a->is_tx == b->is_tx
-	       && a->fft_bins == b->fft_bins
+	       && a->display_width_px == b->display_width_px
 	       && (!a->is_cw || a->wpm == b->wpm);
 
 }
@@ -78,16 +81,16 @@ static uint64_t monotonic_ms(void)
 
 /** Return the sample count to observe, capped at one dit for CW. */
 static int observation_samples(const struct panadapter_fft_config *config,
-							   int decimation)
+							   int decimation, int fft_bins)
 {
 	if (!config->is_cw)
-		return config->fft_bins;
+		return fft_bins;
 
 	const int wpm = config->wpm > 0 ? config->wpm : 1;
 	const double sample_rate = (double)SDR_SAMPLE_RATE / decimation;
 	int count = (int)lround(sample_rate * 1.2 / wpm);
 	if (count < 1) count = 1;
-	if (count > config->fft_bins) count = config->fft_bins;
+	if (count > fft_bins) count = fft_bins;
 	return count;
 }
 
@@ -113,6 +116,7 @@ static bool ensure_fft_plan(struct panadapter_fft *state,
 	state->fft_data = new_data;
 	state->fft_plan = new_plan;
 	state->planned_fft_bins = fft_bins;
+	printf("Panadapter FFT bins: %d\n", fft_bins);
 	return true;
 }
 
@@ -202,10 +206,7 @@ static bool analyze(struct panadapter_fft *state,
 					const struct panadapter_fft_config *config,
 					struct panadapter_fft_frame *frame)
 {
-	const int fft_bins = config->fft_bins;
-	if (fft_bins < 1 || fft_bins > PANADAPTER_FFT_MAX_BINS ||
-		(fft_bins & (fft_bins - 1)) != 0 ||
-		!ensure_fft_plan(state, fft_bins))
+	if (config->display_span_hz < 1 || config->display_width_px < 1)
 		return false;
 
 	const int bandwidth = config->display_span_hz > MIN_ANALYSIS_BANDWIDTH
@@ -213,7 +214,23 @@ static bool analyze(struct panadapter_fft *state,
 	const int guarded_decimation = (100 * SDR_SAMPLE_RATE) /
 		(DECIMATION_GUARD_PERCENT * bandwidth);
 	const int decimation = guarded_decimation > 0 ? guarded_decimation : 1;
-	const int observed = observation_samples(config, decimation);
+	const double output_rate = (double)SDR_SAMPLE_RATE / decimation;
+	const int target_bins = config->display_width_px < PANADAPTER_FFT_FRAME_BINS
+		? config->display_width_px : PANADAPTER_FFT_FRAME_BINS;
+	/* Use the smallest FFT that supplies at least one visible bin per pixel. */
+	int fft_bins = PANADAPTER_FFT_MIN_BINS;
+	while (fft_bins < PANADAPTER_FFT_MAX_BINS) {
+		const double bin_hz = output_rate / fft_bins;
+		const int half_bins = (int)floor(config->display_span_hz /
+			(2.0 * bin_hz));
+		if (2 * half_bins + 1 >= target_bins)
+			break;
+		fft_bins *= 2;
+	}
+	if (!ensure_fft_plan(state, fft_bins))
+		return false;
+
+	const int observed = observation_samples(config, decimation, fft_bins);
 	const int raw_count = (observed - 1) * decimation + FILTER_TAPS;
 	uint64_t first_sample;
 	uint64_t sample_end_ms;
@@ -229,7 +246,7 @@ static bool analyze(struct panadapter_fft *state,
 	memset(state->fft_data, 0, sizeof(*state->fft_data) * fft_bins);
 
 	// Keep signal levels independent of FFT length, preserving 2048-bin levels.
-	const float length_scale = (float)PANADAPTER_FFT_DEFAULT_BINS / (float)observed;
+	const float length_scale = (float)FFT_LEVEL_REFERENCE_BINS / (float)observed;
 	for (int output = 0; output < observed; output++) {
 		const int newest = FILTER_TAPS - 1 + output * decimation;
 		fftwf_complex sum = 0.0f;
@@ -252,20 +269,19 @@ static bool analyze(struct panadapter_fft *state,
 		state->smoothed_config_valid = true;
 	}
 
-	const double output_rate = (double)SDR_SAMPLE_RATE / decimation;
 	const double bin_hz = output_rate / fft_bins;
 	int half_bins = (int)floor(config->display_span_hz / (2.0 * bin_hz));
 	const int max_half_bins = fft_bins > 1 ? fft_bins / 2 - 1 : 0;
 	if (half_bins > max_half_bins)
 		half_bins = max_half_bins;
 	const int visible_bins = 2 * half_bins + 1;
-	frame->count = visible_bins < PANADAPTER_FFT_FRAME_BINS
-		? visible_bins : PANADAPTER_FFT_FRAME_BINS;
+	frame->count = visible_bins < target_bins ? visible_bins : target_bins;
 	frame->first_hz = config->center_hz + half_bins * bin_hz;
 	frame->bin_step_hz = frame->count > 1
 		? -(visible_bins - 1) * bin_hz / (frame->count - 1) : -bin_hz;
 	frame->decimation = decimation;
 	frame->observation_samples = observed;
+	frame->fft_bins = fft_bins;
 	frame->sample_end_ms = sample_end_ms;
 	frame->config = *config;
 

@@ -1184,9 +1184,6 @@ struct field main_controls[] = {
 	{"#wf_spd", do_wf_edit, 150, 20, 5, 50, "WFSPD", 50, "50", FIELD_NUMBER, STYLE_FIELD_VALUE,
 	 "", 20, 150, 5, 0},
 
-	{"#wf_fftbins", NULL, 1000, -1000, 85, 40, "WF_FFTBINS", 50, "2048", FIELD_SELECTION, STYLE_FIELD_VALUE,
-	 "16384/8192/4096/2048/1024/512/256/128/64/32/16/8/4/2/1", 0, 0, 0, 0},
-
 	{"#scope_gain", do_wf_edit, 25, 1, 1, 10, "SCOPEGAIN", 10, "1.0", FIELD_NUMBER, STYLE_FIELD_VALUE,
 	 "", 1, 25, 1, 0},
 
@@ -2477,29 +2474,21 @@ static int spectrum_refresh_interval_ms(int mode)
 	return MAX(1, MIN(interval, 500));
 }
 
-static int spectrum_fft_bins(void)
-{
-	static struct field *field;
-	if (!field)
-		field = get_field("#wf_fftbins");
-	return field ? atoi(field->value) : PANADAPTER_FFT_DEFAULT_BINS;
-}
-
 static void spectrum_display_frame_get(struct spectrum_display_frame *frame)
 {
-	int span_hz = spectrum_display_span_hz();
-	int mode = mode_id(get_field("r1:mode")->value);
-	int center_hz = spectrum_uses_passband()
+	const int span_hz = spectrum_display_span_hz();
+	const int mode = mode_id(get_field("r1:mode")->value);
+	const int center_hz = spectrum_uses_passband()
 		? (spectrum_is_reversed() ? -span_hz / 2 : span_hz / 2) : 0;
-	int fft_bins = spectrum_fft_bins();
-	struct panadapter_fft_config config = {
+	const struct field *const spectrum = get_field("spectrum");
+	const struct panadapter_fft_config config = {
 		.display_span_hz = span_hz,
 		.center_hz = center_hz,
 		.is_cw = mode == MODE_CW || mode == MODE_CWR,
 		.is_tx = in_tx,
 		.wpm = MAX(1, get_wpm()),
 		.refresh_ms = spectrum_refresh_interval_ms(mode),
-		.fft_bins = fft_bins,
+		.display_width_px = MAX(1, spectrum->width),
 	};
 	struct panadapter_fft_frame panadapter;
 	panadapter_fft_request(panadapter_fft_context, &config);
@@ -5079,7 +5068,6 @@ void menu2_display(int show) {
 		field_move("WFMIN", SC(5), screen_height - SC(80), SC(70), SC(37));
 		field_move("WFMAX", SC(5), screen_height - SC(40), SC(70), SC(37));
 		field_move("WFSPD", SC(80), screen_height - SC(80), SC(70), SC(37));
-		field_move("WF_FFTBINS", SC(80), screen_height - SC(40), SC(85), SC(37));
 		field_move("SCOPEGAIN", SC(170), screen_height - SC(80), SC(70), SC(37));
 		field_move("SCOPEAVG", SC(170), screen_height - SC(40), SC(70), SC(37));  // Add SCOPEAVG field
 		field_move("SCOPESIZE", SC(245), screen_height - SC(80), SC(70), SC(37)); // Add SCOPESIZE field
