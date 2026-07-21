@@ -5684,7 +5684,6 @@ static void layout_ui()
 
     field_move("PAD",    SC(135), SC(5), SC(40), SC(40));
     field_move("REC",    SC(459), SC(50), SC(40), SC(40));
-    field_move("TUNE",   x2 - SC(443), SC(5), SC(40), SC(40));
     field_move("CALL", SC(5),   SC(50), SC(85), SC(20));
     field_move("SENT", SC(90),  SC(50), SC(50), SC(20));
     field_move("RECV", SC(140), SC(50), SC(50), SC(20));
@@ -5694,7 +5693,6 @@ static void layout_ui()
     field_move("WIPE", SC(330), SC(50), SC(40), SC(40));
     field_move("QRZ",  SC(370), SC(50), SC(40), SC(40));
     field_move("LOG",  SC(410), SC(50), SC(40), SC(40));
-    field_move("MENU", SC(410), SC(5), SC(40), SC(40));
     field_move("TEXT", SC(5), SC(70), SC(285), SC(20));
   }
 
@@ -5702,35 +5700,30 @@ static void layout_ui()
 
   // Top control row (y=5), evenly spaced with a uniform 3px gap. MUTE is
   // flush to the right edge; FREQ (the wide frequency readout) sits between
-  // VFO and AUDIO. RIT is the left-most of this shared cluster.
+  // VFO and AUDIO. TUNE is the left-most of this shared cluster.
   //   MUTE : x2-45 .. x2-5
   //   AUDIO: x2-88 .. x2-48
   //   FREQ : x2-271.. x2-91   (width 180)
   //   VFO  : x2-314.. x2-274
-  //   RIT  : x2-357.. x2-317
+  //   TUNE : x2-357.. x2-317
   field_move("MUTE", x2 - SC(45), SC(5), SC(40), SC(40));
   field_move("AUDIO", x2 - SC(88), SC(5), SC(40), SC(40));
   field_move("FREQ", x2 - SC(271), SC(3), SC(180), SC(40));
   field_move("VFO", x2 - SC(314), SC(5), SC(40), SC(40));
-  field_move("RIT", x2 - SC(357), SC(5), SC(40), SC(40));
+  field_move("TUNE", x2 - SC(357), SC(5), SC(40), SC(40));
   field_move("STEP", x2 - SC(212), SC(50), SC(40), SC(40));
 
   field_move("IF", x2 - SC(45), SC(50), SC(40), SC(40));
   field_move("DRIVE", x2 - SC(87), SC(50), SC(42), SC(40));
   field_move("BW", x2 - SC(127), SC(50), SC(40), SC(40));
   field_move("AGC", x2 - SC(170), SC(50), SC(42), SC(40));
+  field_move("RIT", x2 - SC(295), SC(50), SC(40), SC(40));
   field_move("SPLIT", x2 - SC(252), SC(50), SC(40), SC(40));
 
-  // Left pair of the top row, continuing the uniform 3px spacing to the left
-  // of RIT. TUNE is always here. The slot immediately left of RIT holds REC
-  // in the default (1.0) layout and MENU in the scaled layout, matching how
-  // each layout arranges its header buttons.
-  //   TUNE : x2-443 .. x2-403
-  //   (REC or MENU): x2-400 .. x2-360
-  field_move("TUNE", x2 - SC(443), SC(5), SC(40), SC(40));
-  if (ui_scale != 1.0f)
-    field_move("MENU", x2 - SC(400), SC(5), SC(40), SC(40));
-  else
+  // MENU occupies TUNE's former top-row slot. REC remains beside it in the
+  // default layout.
+  field_move("MENU", x2 - SC(443), SC(5), SC(40), SC(40));
+  if (ui_scale == 1.0f)
     field_move("REC", x2 - SC(400), SC(5), SC(40), SC(40));
 
   if (!strcmp(field_str("KBD"), "ON")) {
@@ -5943,7 +5936,7 @@ static void layout_ui()
 
     // TUNE control is on screen in this mode
 	field_move("PAD", SC(135), SC(5), SC(40), SC(40));
-	field_move("TUNE",   x2 - SC(443), SC(5), SC(40), SC(40));
+	field_move("TUNE",   x2 - SC(357), SC(5), SC(40), SC(40));
     break;
 
   case MODE_USB:
@@ -5980,7 +5973,7 @@ static void layout_ui()
     field_move("SPECT", x2 - SC(97), y_bottom, SC(45), row_h);
 
     field_move("PAD", SC(135), SC(5), SC(40), SC(40));
-    field_move("TUNE",   x2 - SC(443), SC(5), SC(40), SC(40));
+    field_move("TUNE",   x2 - SC(357), SC(5), SC(40), SC(40));
   }
   break;
 
@@ -6014,7 +6007,7 @@ static void layout_ui()
     field_move("SPECT", x2 - SC(97), y_bottom, SC(45), row_h);
 
     field_move("PAD",  SC(135), SC(5), SC(40), SC(40));
-    field_move("TUNE", x2 - SC(443), SC(5), SC(40), SC(40));
+    field_move("TUNE", x2 - SC(357), SC(5), SC(40), SC(40));
   }
   break;
 
@@ -6049,7 +6042,7 @@ static void layout_ui()
     field_move("SPECT", x2 - SC(97), y_bottom, SC(45), row_h);
 
     field_move("PAD",  SC(135), SC(5), SC(40), SC(40));
-    field_move("TUNE", x2 - SC(443), SC(5), SC(40), SC(40));
+    field_move("TUNE", x2 - SC(357), SC(5), SC(40), SC(40));
   }
   break;
 
@@ -6088,7 +6081,7 @@ static void layout_ui()
     field_move("SPECT",    x2 - SC(97), y_bottom, SC(45), row_h);
 
     field_move("PAD",  SC(135), SC(5), SC(40), SC(40));
-    field_move("TUNE", x2 - SC(443), SC(5), SC(40), SC(40));
+    field_move("TUNE", x2 - SC(357), SC(5), SC(40), SC(40));
   }
   break;
 
@@ -6128,7 +6121,7 @@ static void layout_ui()
 
     // keep TUNE and PAD where they live on top row
     field_move("PAD", SC(135), SC(5), SC(40), SC(40));
-    field_move("TUNE",   x2 - SC(443), SC(5), SC(40), SC(40));
+    field_move("TUNE",   x2 - SC(357), SC(5), SC(40), SC(40));
   }
   break;
 
