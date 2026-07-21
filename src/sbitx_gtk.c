@@ -3459,6 +3459,7 @@ static int waterfall_offset = 30;
 static int *wf = NULL;
 GdkPixbuf *waterfall_pixbuf = NULL;
 guint8 *waterfall_map = NULL;
+static guint8 *waterfall_history_map;
 static bool waterfall_dragging;
 static uint64_t waterfall_live_sample_end;
 static float waterfall_color_offset;
@@ -3471,7 +3472,13 @@ struct waterfall_history_row {
 
 static struct waterfall_history_row *waterfall_history_rows;
 static int waterfall_history_row_count;
+static int waterfall_storage_width;
+static int waterfall_storage_height;
+static int waterfall_display_width;
+static int waterfall_display_height;
+static uint64_t waterfall_drawn_sample_end;
 static uint64_t waterfall_view_generation = 1;
+static uint64_t waterfall_history_map_generation;
 static uint64_t waterfall_request_token;
 static struct panadapter_fft_config waterfall_history_config;
 static struct {
@@ -3719,6 +3726,83 @@ static int override_remote_display = 0;
 static int override_remote_display_timeout = 300; // 5 minutes
 static time_t last_override_time = 0;
 
+static bool resize_waterfall(struct field *f)
+{
+	if (!f || f->width < 1 || f->height < 1)
+		return false;
+	const bool width_changed = waterfall_storage_width != f->width;
+	const int new_height = MAX(waterfall_storage_height,
+		MAX(f->height, screen_height));
+	const bool storage_changed = !waterfall_map || width_changed ||
+		new_height != waterfall_storage_height;
+
+	if (storage_changed) {
+		guint8 *new_map = calloc((size_t)f->width * new_height, 3);
+		guint8 *new_history_map = calloc((size_t)f->width * new_height, 3);
+		struct waterfall_history_row *new_rows = calloc(new_height,
+			sizeof(*new_rows));
+		if (!new_map || !new_history_map || !new_rows) {
+			free(new_map);
+			free(new_history_map);
+			free(new_rows);
+			return false;
+		}
+
+		const int rows = MIN(waterfall_storage_height, new_height);
+		if (waterfall_map && waterfall_storage_width > 0) {
+			for (int y = 0; y < rows; y++) {
+				for (int x = 0; x < f->width; x++) {
+					const int old_x = (int)((int64_t)x *
+						waterfall_storage_width / f->width);
+					memcpy(new_map + ((size_t)y * f->width + x) * 3,
+						waterfall_map + ((size_t)y * waterfall_storage_width + old_x) * 3,
+						3);
+				}
+			}
+		}
+		if (waterfall_history_rows)
+			memcpy(new_rows, waterfall_history_rows,
+				(size_t)MIN(waterfall_history_row_count, new_height) * sizeof(*new_rows));
+		memcpy(new_history_map, new_map, (size_t)f->width * new_height * 3);
+
+		if (waterfall_pixbuf) {
+			g_object_unref(waterfall_pixbuf);
+			waterfall_pixbuf = NULL;
+		}
+		free(waterfall_map);
+		free(waterfall_history_map);
+		free(waterfall_history_rows);
+		waterfall_map = new_map;
+		waterfall_history_map = new_history_map;
+		waterfall_history_map_generation = 0;
+		waterfall_history_rows = new_rows;
+		waterfall_storage_width = f->width;
+		waterfall_storage_height = new_height;
+		waterfall_history_row_count = new_height;
+
+		if (width_changed && rows > 0) {
+			waterfall_view_generation++;
+			if (!waterfall_view_generation)
+				waterfall_view_generation++;
+			waterfall_history_config = spectrum_fft_config();
+			waterfall_history_start();
+		}
+	}
+
+	if (!waterfall_pixbuf || waterfall_display_width != f->width ||
+		waterfall_display_height != f->height) {
+		if (waterfall_pixbuf)
+			g_object_unref(waterfall_pixbuf);
+		waterfall_pixbuf = gdk_pixbuf_new_from_data(waterfall_map,
+			GDK_COLORSPACE_RGB, FALSE, 8, f->width, f->height,
+			waterfall_storage_width * 3, NULL, NULL);
+		waterfall_display_width = f->width;
+		waterfall_display_height = f->height;
+		waterfall_history_start();
+	}
+	return waterfall_pixbuf != NULL;
+}
+
 void init_waterfall()
 {
 	struct field *f = get_field("waterfall");
@@ -3765,57 +3849,19 @@ void init_waterfall()
 	// Print dimensions for debugging -W2ON
 	// printf("Waterfall dimensions: width = %d, height = %d\n", f->width, f->height);
 
-	if (wf)
-	{
-		free(wf);
-	}
-	// Allocate memory for wf buffer
-	wf = malloc((MAX_BINS / 2) * f->height * sizeof(int));
+	if (!wf)
+		wf = calloc(MAX_BINS, sizeof(*wf));
 	if (!wf)
 	{
 		puts("*Error: malloc failed on waterfall buffer (wf)");
 		exit(0);
 	}
-	memset(wf, 0, (MAX_BINS / 2) * f->height * sizeof(int));
 
-	if (waterfall_map)
-	{
-		free(waterfall_map);
-	}
-	free(waterfall_history_rows);
-	waterfall_history_rows = calloc(f->height, sizeof(*waterfall_history_rows));
-	waterfall_history_row_count = waterfall_history_rows ? f->height : 0;
-	waterfall_history_request.active = false;
-	// Allocate memory for waterfall_map buffer
-	waterfall_map = malloc(f->width * f->height * 3);
-	if (!waterfall_map)
+	if (!resize_waterfall(f))
 	{
 		puts("*Error: malloc failed on waterfall buffer (waterfall_map)");
-		free(wf); // Clean up previously allocated memory
 		exit(0);
 	}
-
-	for (int i = 0; i < f->width; i++)
-	{
-		for (int j = 0; j < f->height; j++)
-		{
-			int row = j * f->width * 3;
-			int index = row + i * 3;
-			waterfall_map[index++] = 0;
-			waterfall_map[index++] = 0; // i % 256;
-			waterfall_map[index++] = 0; // j % 256;
-		}
-	}
-
-	if (waterfall_pixbuf)
-	{
-		g_object_unref(waterfall_pixbuf);
-	}
-	waterfall_pixbuf = gdk_pixbuf_new_from_data(waterfall_map,
-												GDK_COLORSPACE_RGB, FALSE, 8, f->width, f->height, f->width * 3, NULL, NULL);
-	// format,         alpha?, bit,  width,    height, rowstride, destroyfn, data
-
-	//	printf("%ld return from pixbuff", (int)waterfall_pixbuf);
 }
 
 static void waterfall_color_pixel(float value, float min_db, float max_db,
@@ -3860,19 +3906,21 @@ static void waterfall_render_history_row(struct field *f, int row,
 		(font_table[STYLE_SMALL].height * 4 / 3);
 	if (frame->count < 1 || grid_height < 1)
 		return;
+	guint8 *target = waterfall_history_map_generation == waterfall_view_generation
+		? waterfall_history_map : waterfall_map;
 	for (int x = 0; x < f->width; x++) {
 		const int bin = (f->width - 1 - x) * frame->count / f->width;
 		int y = ((frame->bins[bin] + waterfall_offset) * spectrum->height) / 80;
 		y = MAX(0, MIN(spectrum->height - 1, y));
 		waterfall_color_pixel((y * 100) / grid_height, min_db, max_db,
-			offset, waterfall_map + ((size_t)row * f->width + x) * 3);
+			offset, target + ((size_t)row * f->width + x) * 3);
 	}
 }
 
 static bool waterfall_history_update(struct field *f, float min_db,
 									  float max_db, float offset)
 {
-	if (!waterfall_history_rows || waterfall_history_row_count != f->height)
+	if (!waterfall_history_rows || waterfall_history_row_count < f->height)
 		return false;
 
 	if (waterfall_history_request.active) {
@@ -3916,12 +3964,23 @@ static bool waterfall_history_update(struct field *f, float min_db,
 		};
 		return true;
 	}
+	if (waterfall_history_map_generation == waterfall_view_generation) {
+		memcpy(waterfall_map, waterfall_history_map,
+			(size_t)waterfall_storage_width * f->height * 3);
+		waterfall_history_map_generation = 0;
+	}
 	return false;
 }
 
 static gboolean waterfall_history_tick(gpointer unused)
 {
 	(void)unused;
+	if (!waterfall_dragging && waterfall_history_map &&
+		waterfall_history_map_generation != waterfall_view_generation) {
+		memcpy(waterfall_history_map, waterfall_map,
+			(size_t)waterfall_storage_width * waterfall_storage_height * 3);
+		waterfall_history_map_generation = waterfall_view_generation;
+	}
 	struct field *f = get_field("waterfall");
 	const bool pending = waterfall_history_update(f,
 		(wf_min - 1.0f) * 100.0f, 100.0f * wf_max,
@@ -3934,8 +3993,14 @@ static gboolean waterfall_history_tick(gpointer unused)
 
 static void waterfall_history_start(void)
 {
+	if (!waterfall_dragging && waterfall_history_map &&
+		waterfall_history_map_generation != waterfall_view_generation) {
+		memcpy(waterfall_history_map, waterfall_map,
+			(size_t)waterfall_storage_width * waterfall_storage_height * 3);
+		waterfall_history_map_generation = waterfall_view_generation;
+	}
 	if (!waterfall_history_timer)
-		waterfall_history_timer = g_timeout_add(10, waterfall_history_tick, NULL);
+		waterfall_history_timer = g_timeout_add(1, waterfall_history_tick, NULL);
 }
 
 void draw_tx_meters(struct field *f, cairo_t *gfx)
@@ -4042,28 +4107,35 @@ void draw_waterfall(struct field *f, cairo_t *gfx)
 		}
 	}
 
-	// Scroll the existing waterfall data down
-	memmove(waterfall_map + f->width * 3, waterfall_map,
-			f->width * (f->height - 1) * 3);
-	if (waterfall_history_rows && waterfall_history_row_count == f->height) {
+	if (waterfall_live_sample_end &&
+		waterfall_live_sample_end != waterfall_drawn_sample_end) {
+		waterfall_drawn_sample_end = waterfall_live_sample_end;
+		// Advance retained history only when a new FFT frame arrives.
+		memmove(waterfall_map + waterfall_storage_width * 3, waterfall_map,
+			(size_t)waterfall_storage_width * (waterfall_storage_height - 1) * 3);
+		if (waterfall_history_map_generation == waterfall_view_generation)
+			memmove(waterfall_history_map + waterfall_storage_width * 3,
+				waterfall_history_map,
+				(size_t)waterfall_storage_width * (waterfall_storage_height - 1) * 3);
 		memmove(waterfall_history_rows + 1, waterfall_history_rows,
-			(size_t)(f->height - 1) * sizeof(*waterfall_history_rows));
+			(size_t)(waterfall_history_row_count - 1) * sizeof(*waterfall_history_rows));
 		waterfall_history_rows[0] = (struct waterfall_history_row) {
 			.sample_end = waterfall_live_sample_end,
 			.view_generation = waterfall_view_generation,
 		};
+
+		if (strcmp(field_str("AUTOSCOPE"), "ON") || in_tx)
+			waterfall_color_offset = 0;
+		for (int i = 0; i < f->width; i++) {
+			waterfall_color_pixel(wf[i], min_db, max_db, waterfall_color_offset,
+				waterfall_map + i * 3);
+			if (waterfall_history_map_generation == waterfall_view_generation)
+				waterfall_color_pixel(wf[i], min_db, max_db, waterfall_color_offset,
+					waterfall_history_map + i * 3);
+		}
+
+		waterfall_color_offset += ((sp_baseline + 40)*2 - waterfall_color_offset) / 10;
 	}
-
-	if (strcmp(field_str("AUTOSCOPE"), "ON") || in_tx)
-		waterfall_color_offset = 0;
-	for (int i = 0; i < f->width; i++)
-		waterfall_color_pixel(wf[i], min_db, max_db, waterfall_color_offset,
-			waterfall_map + i * 3);
-
-	// Use the same baseline that had been calculated for the spectrum
-	// This gives good results as it's averaged, hence less noisy
-	// Smoothly adjust the waterfall offset
-	waterfall_color_offset += ((sp_baseline + 40)*2 - waterfall_color_offset) / 10;
 
 	// Draw the updated waterfall
 	gdk_cairo_set_source_pixbuf(gfx, waterfall_pixbuf, f->x, f->y);
@@ -5338,8 +5410,12 @@ void field_move(char *field_label, int x, int y, int width, int height)
 	f->width = width;
 	f->height = height;
 	update_field(f);
-	if (!strcmp(field_label, "WATERFALL"))
-		init_waterfall();
+	if (!strcmp(field_label, "WATERFALL")) {
+		if (waterfall_map)
+			resize_waterfall(f);
+		else
+			init_waterfall();
+	}
 }
 
 void menu_display(int show) {
