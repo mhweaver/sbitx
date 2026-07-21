@@ -44,12 +44,12 @@ void panadapter_fft_request(struct panadapter_fft *context, const struct panadap
 
 bool panadapter_fft_get_frame(struct panadapter_fft *context, const struct panadapter_fft_config *config, struct panadapter_fft_frame *frame);
 
-bool panadapter_fft_request_history(struct panadapter_fft *context,
-  const struct panadapter_fft_config *config, uint64_t sample_end,
-  uint64_t generation);
+bool panadapter_fft_request_history_batch(struct panadapter_fft *context,
+  const struct panadapter_fft_config *config, const uint64_t *sample_ends,
+  int count, uint64_t generation);
 
-bool panadapter_fft_get_history_frame(struct panadapter_fft *context,
-  uint64_t generation, struct panadapter_fft_frame *frame);
+struct panadapter_fft_frame *panadapter_fft_take_history_batch(
+  struct panadapter_fft *context, uint64_t generation, int *count);
 
 int panadapter_fft_frame_latency_ms(const struct panadapter_fft_frame *frame);
 

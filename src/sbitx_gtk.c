@@ -3924,46 +3924,66 @@ static bool waterfall_history_update(struct field *f, float min_db,
 		return false;
 
 	if (waterfall_history_request.active) {
-		struct panadapter_fft_frame frame;
-		if (panadapter_fft_get_history_frame(panadapter_fft_context,
-				waterfall_history_request.token, &frame)) {
+		int frame_count = 0;
+		struct panadapter_fft_frame *frames =
+			panadapter_fft_take_history_batch(panadapter_fft_context,
+				waterfall_history_request.token, &frame_count);
+		if (frames) {
 			if (waterfall_history_request.view_generation == waterfall_view_generation) {
-				for (int row = 0; row < f->height; row++) {
-					if (waterfall_history_rows[row].sample_end !=
-						waterfall_history_request.sample_end ||
-						waterfall_history_rows[row].view_generation ==
-						waterfall_view_generation)
-						continue;
-					if (frame.count > 0)
-						waterfall_render_history_row(f, row, &frame,
-							min_db, max_db, offset);
-					waterfall_history_rows[row].view_generation =
-						waterfall_view_generation;
+				for (int result = 0; result < frame_count; result++) {
+					for (int row = 0; row < f->height; row++) {
+						if (waterfall_history_rows[row].sample_end !=
+							frames[result].sample_end ||
+							waterfall_history_rows[row].view_generation ==
+							waterfall_view_generation)
+							continue;
+						if (frames[result].count > 0)
+							waterfall_render_history_row(f, row, &frames[result],
+								min_db, max_db, offset);
+						waterfall_history_rows[row].view_generation =
+							waterfall_view_generation;
+					}
 				}
 			}
+			free(frames);
 			waterfall_history_request.active = false;
 		}
 	}
 
 	if (waterfall_dragging || waterfall_history_request.active)
 		return true;
+	uint64_t *sample_ends = malloc((size_t)f->height * sizeof(*sample_ends));
+	if (!sample_ends)
+		return true;
+	int count = 0;
 	for (int row = 0; row < f->height; row++) {
 		if (!waterfall_history_rows[row].sample_end ||
 			waterfall_history_rows[row].view_generation == waterfall_view_generation)
 			continue;
+		bool duplicate = false;
+		// ponytail: visible rows are screen-bounded; avoid sorting this tiny list.
+		for (int previous = 0; previous < count; previous++)
+			if (sample_ends[previous] == waterfall_history_rows[row].sample_end)
+				duplicate = true;
+		if (!duplicate)
+			sample_ends[count++] = waterfall_history_rows[row].sample_end;
+	}
+	if (count > 0) {
 		const uint64_t token = ++waterfall_request_token;
-		if (!token || !panadapter_fft_request_history(panadapter_fft_context,
-				&waterfall_history_config,
-				waterfall_history_rows[row].sample_end, token))
+		const bool queued = token && panadapter_fft_request_history_batch(
+			panadapter_fft_context, &waterfall_history_config,
+			sample_ends, count, token);
+		free(sample_ends);
+		if (!queued)
 			return true;
 		waterfall_history_request = (typeof(waterfall_history_request)) {
 			.active = true,
 			.token = token,
-			.sample_end = waterfall_history_rows[row].sample_end,
 			.view_generation = waterfall_view_generation,
 		};
 		return true;
 	}
+	free(sample_ends);
 	if (waterfall_history_map_generation == waterfall_view_generation) {
 		memcpy(waterfall_map, waterfall_history_map,
 			(size_t)waterfall_storage_width * f->height * 3);

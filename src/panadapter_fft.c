@@ -38,6 +38,7 @@ _Static_assert((HISTORY_RING_SIZE & (HISTORY_RING_SIZE - 1)) == 0, "panadapter F
 struct panadapter_fft {
   fftwf_complex *sample_ring;
   _Atomic uint64_t samples_written;
+  _Atomic uint64_t history_epoch;
 
   fftwf_complex raw_work[WORK_SIZE];
   fftwf_complex *fft_data;
@@ -61,12 +62,16 @@ struct panadapter_fft {
   bool reset_smoothing;
   struct panadapter_fft_frame published_frame;
 
-  struct panadapter_fft_config history_config;
-  uint64_t history_sample_end;
-  uint64_t history_generation;
-  bool history_request_pending;
-  bool history_busy;
-  struct panadapter_fft_frame published_history_frame;
+  struct panadapter_fft_config history_batch_config;
+  uint64_t *history_batch_ends;
+  int history_batch_count;
+  uint64_t history_batch_generation;
+  uint64_t history_batch_epoch;
+  bool history_batch_pending;
+  bool history_batch_busy;
+  struct panadapter_fft_frame *published_history_batch;
+  int published_history_batch_count;
+  uint64_t published_history_batch_generation;
 };
 
 /** Return whether two configurations produce equivalent spectrum frames. */
@@ -167,7 +172,8 @@ static bool snapshot_samples(struct panadapter_fft *state, int count,
 }
 
 /** Mix the requested analysis center down to DC in place. */
-static void shift_samples(struct panadapter_fft *state, int count, int center_hz, uint64_t first_sample) {
+static void shift_buffer(fftwf_complex *samples, int count, int center_hz,
+                         uint64_t first_sample) {
   if (center_hz == 0) {
     return;
   }
@@ -180,7 +186,7 @@ static void shift_samples(struct panadapter_fft *state, int count, int center_hz
   const float step_q = sinf((float) step);
 
   for (int index = 0; index < count; index++) {
-    state->raw_work[index] *= oscillator_i + I * oscillator_q;
+    samples[index] *= oscillator_i + I * oscillator_q;
 
     const float next_i = oscillator_i * step_i - oscillator_q * step_q;
     oscillator_q = oscillator_i * step_q + oscillator_q * step_i;
@@ -191,6 +197,11 @@ static void shift_samples(struct panadapter_fft *state, int count, int center_hz
       oscillator_q /= magnitude;
     }
   }
+}
+
+static void shift_samples(struct panadapter_fft *state, int count,
+                          int center_hz, uint64_t first_sample) {
+  shift_buffer(state->raw_work, count, center_hz, first_sample);
 }
 
 /** Produce one cropped, smoothed display spectrum from the newest samples. */
@@ -303,27 +314,192 @@ static bool analyze(struct panadapter_fft *state,
   return true;
 }
 
+/** Build historical rows together, sharing the I/Q copy, mixer and FIR results. */
+static struct panadapter_fft_frame *analyze_history_batch(
+    struct panadapter_fft *state, const struct panadapter_fft_config *config,
+    const uint64_t *sample_ends, int count, uint64_t history_epoch) {
+  struct panadapter_fft_frame *frames = calloc((size_t)count, sizeof(*frames));
+  if (!frames || count < 1 || config->display_span_hz < 1 ||
+      config->display_width_px < 1)
+    return frames;
+  for (int row = 0; row < count; row++) {
+    frames[row].sample_end = sample_ends[row];
+    frames[row].config = *config;
+  }
+  if (atomic_load_explicit(&state->history_epoch, memory_order_relaxed) !=
+      history_epoch)
+    return frames;
+
+  const int bandwidth = config->display_span_hz > MIN_ANALYSIS_BANDWIDTH
+                          ? config->display_span_hz : MIN_ANALYSIS_BANDWIDTH;
+  const int guarded_decimation = (100 * SDR_SAMPLE_RATE) /
+    (DECIMATION_GUARD_PERCENT * bandwidth);
+  const int decimation = guarded_decimation > 0 ? guarded_decimation : 1;
+  const double output_rate = (double)SDR_SAMPLE_RATE / decimation;
+  const int target_bins = config->display_width_px < PANADAPTER_FFT_FRAME_BINS
+                            ? config->display_width_px : PANADAPTER_FFT_FRAME_BINS;
+  int fft_bins = PANADAPTER_FFT_MIN_BINS;
+  while (fft_bins < PANADAPTER_FFT_MAX_BINS) {
+    const double bin_hz = output_rate / fft_bins;
+    const int half_bins = (int)floor(config->display_span_hz / (2.0 * bin_hz));
+    if (2 * half_bins + 1 >= target_bins)
+      break;
+    fft_bins *= 2;
+  }
+  if (!ensure_fft_plan(state, fft_bins))
+    return frames;
+
+  const int observed = observation_samples(config, decimation, fft_bins);
+  const int raw_count = (observed - 1) * decimation + FILTER_TAPS;
+  const uint64_t current = atomic_load_explicit(&state->samples_written,
+    memory_order_acquire);
+  uint64_t first_sample = UINT64_MAX;
+  uint64_t last_sample = 0;
+  for (int row = 0; row < count; row++) {
+    const uint64_t end = sample_ends[row];
+    if (end > current || end < (uint64_t)raw_count ||
+        current - end + raw_count + PANADAPTER_FFT_MAX_BINS > HISTORY_RING_SIZE)
+      continue;
+    const uint64_t start = end - raw_count;
+    if (start < first_sample) first_sample = start;
+    if (end > last_sample) last_sample = end;
+  }
+  if (first_sample == UINT64_MAX)
+    return frames;
+
+  const size_t input_count = (size_t)(last_sample - first_sample);
+  fftwf_complex *input = fftwf_alloc_complex(input_count);
+  const size_t filtered_count = input_count - FILTER_TAPS + 1;
+  fftwf_complex *filtered = fftwf_alloc_complex(filtered_count);
+  unsigned char *computed = calloc(filtered_count, 1);
+  if (!input || !filtered || !computed) {
+    if (input) fftwf_free(input);
+    if (filtered) fftwf_free(filtered);
+    free(computed);
+    return frames;
+  }
+
+  const size_t ring_index = (size_t)(first_sample & HISTORY_RING_INDEX_MASK);
+  size_t first_count = HISTORY_RING_SIZE - ring_index;
+  if (first_count > input_count) first_count = input_count;
+  memcpy(input, state->sample_ring + ring_index, first_count * sizeof(*input));
+  memcpy(input + first_count, state->sample_ring,
+    (input_count - first_count) * sizeof(*input));
+  if (atomic_load_explicit(&state->samples_written, memory_order_acquire) -
+      first_sample > HISTORY_RING_SIZE) {
+    fftwf_free(input);
+    fftwf_free(filtered);
+    free(computed);
+    return frames;
+  }
+
+  shift_buffer(input, (int)input_count, config->center_hz, first_sample);
+  if (atomic_load_explicit(&state->history_epoch, memory_order_relaxed) !=
+      history_epoch) {
+    fftwf_free(input);
+    fftwf_free(filtered);
+    free(computed);
+    return frames;
+  }
+  if (bandwidth != state->filter_bandwidth_hz) {
+    make_filter(state, bandwidth);
+    state->filter_bandwidth_hz = bandwidth;
+  }
+
+  const float length_scale = sqrtf((float)(FFT_LEVEL_REFERENCE_BINS * decimation) /
+    (float)observed);
+  const double bin_hz = output_rate / fft_bins;
+  int half_bins = (int)floor(config->display_span_hz / (2.0 * bin_hz));
+  const int max_half_bins = fft_bins > 1 ? fft_bins / 2 - 1 : 0;
+  if (half_bins > max_half_bins) half_bins = max_half_bins;
+  const int visible_bins = 2 * half_bins + 1;
+
+  for (int row = 0; row < count; row++) {
+    if (atomic_load_explicit(&state->history_epoch, memory_order_relaxed) !=
+        history_epoch)
+      break;
+    const uint64_t end = sample_ends[row];
+    if (end > last_sample || end < (uint64_t)raw_count ||
+        end - raw_count < first_sample)
+      continue;
+    memset(state->fft_data, 0, sizeof(*state->fft_data) * fft_bins);
+    for (int output = 0; output < observed; output++) {
+      const uint64_t newest = end - 1 -
+        (uint64_t)(observed - 1 - output) * decimation;
+      const size_t filtered_index = (size_t)(newest -
+        (first_sample + FILTER_TAPS - 1));
+      if (!computed[filtered_index]) {
+        const size_t input_index = (size_t)(newest - first_sample);
+        fftwf_complex sum = 0.0f;
+        for (int tap = 0; tap < FILTER_TAPS; tap++)
+          sum += state->filter_coeff[tap] * input[input_index - tap];
+        filtered[filtered_index] = sum;
+        computed[filtered_index] = 1;
+      }
+      const float window = observed == 1 ? 1.0f :
+        0.5f - 0.5f * cosf(2.0f * (float)M_PI * output / (observed - 1));
+      state->fft_data[output] = filtered[filtered_index] * window * length_scale;
+    }
+    fftwf_execute(state->fft_plan);
+
+    struct panadapter_fft_frame *frame = &frames[row];
+    frame->count = visible_bins < target_bins ? visible_bins : target_bins;
+    frame->first_hz = config->center_hz + half_bins * bin_hz;
+    frame->bin_step_hz = frame->count > 1
+      ? -(visible_bins - 1) * bin_hz / (frame->count - 1) : -bin_hz;
+    frame->decimation = decimation;
+    frame->observation_samples = observed;
+    frame->fft_bins = fft_bins;
+    frame->sample_end = end;
+    frame->config = *config;
+    for (int output = 0; output < frame->count; output++) {
+      const int first_visible = output * visible_bins / frame->count;
+      const int end_visible = (output + 1) * visible_bins / frame->count;
+      float magnitude = 0.0f;
+      for (int visible = first_visible; visible < end_visible; visible++) {
+        const int signed_bin = half_bins - visible;
+        const int fft_bin = signed_bin >= 0 ? signed_bin : fft_bins + signed_bin;
+        magnitude = fmaxf(magnitude, cabsf(state->fft_data[fft_bin]));
+      }
+      frame->bins[output] = (int)lroundf(20.0f *
+        log10f(fmaxf(magnitude, 1.0e-12f)));
+    }
+  }
+
+  fftwf_free(input);
+  fftwf_free(filtered);
+  free(computed);
+  return frames;
+}
+
 /** Process coalesced requests and publish only the newest analysis result. */
 static void *panadapter_fft_worker(void *context) {
   struct panadapter_fft *const state = context;
   while (true) {
     pthread_mutex_lock(&state->state_mutex);
-    while (!state->request_pending && !state->history_request_pending && !state->stop_worker)
+    while (!state->request_pending && !state->history_batch_pending &&
+           !state->stop_worker)
       pthread_cond_wait(&state->request_cond, &state->state_mutex);
     if (state->stop_worker) {
       pthread_mutex_unlock(&state->state_mutex);
       break;
     }
-    const bool historical = !state->request_pending;
-    const struct panadapter_fft_config config = historical
-      ? state->history_config : state->pending_config;
-    const uint64_t serial = historical
-      ? state->history_generation : state->pending_serial;
-    const uint64_t sample_end = historical ? state->history_sample_end : 0;
-    const bool reset = !historical && state->reset_smoothing;
-    if (historical) {
-      state->history_request_pending = false;
-      state->history_busy = true;
+    const bool batch = !state->request_pending && state->history_batch_pending;
+    const struct panadapter_fft_config config = batch
+      ? state->history_batch_config : state->pending_config;
+    const uint64_t serial = batch
+      ? state->history_batch_generation : state->pending_serial;
+    uint64_t *batch_ends = NULL;
+    int batch_count = 0;
+    const uint64_t history_epoch = batch ? state->history_batch_epoch :
+      atomic_load_explicit(&state->history_epoch, memory_order_relaxed);
+    const bool reset = !batch && state->reset_smoothing;
+    if (batch) {
+      batch_ends = state->history_batch_ends;
+      batch_count = state->history_batch_count;
+      state->history_batch_ends = NULL;
+      state->history_batch_pending = false;
+      state->history_batch_busy = true;
     } else {
       state->reset_smoothing = false;
       state->request_pending = false;
@@ -333,15 +509,20 @@ static void *panadapter_fft_worker(void *context) {
       state->smoothed_config_valid = false;
 
     struct panadapter_fft_frame frame = {.count = 0};
-    const bool analyzed = analyze(state, &config, sample_end, !historical, &frame);
+    struct panadapter_fft_frame *batch_frames = batch
+      ? analyze_history_batch(state, &config, batch_ends, batch_count,
+          history_epoch) : NULL;
+    free(batch_ends);
+    const bool analyzed = batch ? false
+      : analyze(state, &config, 0, true, &frame);
 
     pthread_mutex_lock(&state->state_mutex);
-    if (historical) {
-      state->history_busy = false;
-      frame.generation = serial;
-      frame.config = config;
-      frame.sample_end = sample_end;
-      state->published_history_frame = frame;
+    if (batch) {
+      state->history_batch_busy = false;
+      free(state->published_history_batch);
+      state->published_history_batch = batch_frames;
+      state->published_history_batch_count = batch_count;
+      state->published_history_batch_generation = serial;
     } else if (analyzed && serial == state->pending_serial) {
       frame.generation = serial;
       state->published_frame = frame;
@@ -364,6 +545,7 @@ struct panadapter_fft *panadapter_fft_create(void) {
   }
 
   atomic_init(&state->samples_written, 0);
+  atomic_init(&state->history_epoch, 0);
   if (pthread_mutex_init(&state->state_mutex, NULL) != 0) {
     fftwf_free(state->sample_ring);
     free(state);
@@ -394,6 +576,8 @@ void panadapter_fft_destroy(struct panadapter_fft *state) {
   pthread_cond_signal(&state->request_cond);
   pthread_mutex_unlock(&state->state_mutex);
   pthread_join(state->worker_thread, NULL);
+  free(state->history_batch_ends);
+  free(state->published_history_batch);
   pthread_cond_destroy(&state->request_cond);
   pthread_mutex_destroy(&state->state_mutex);
   fftwf_free(state->sample_ring);
@@ -448,37 +632,52 @@ bool panadapter_fft_get_frame(struct panadapter_fft *state,
   return available;
 }
 
-/** Queue one historical analysis without delaying a pending live frame. */
-bool panadapter_fft_request_history(struct panadapter_fft *state,
-                                    const struct panadapter_fft_config *config,
-                                    uint64_t sample_end, uint64_t generation) {
-  if (!state || !config || !sample_end || !generation)
+/** Queue all visible historical rows as one shared-preprocessing job. */
+bool panadapter_fft_request_history_batch(struct panadapter_fft *state,
+                                          const struct panadapter_fft_config *config,
+                                          const uint64_t *sample_ends, int count,
+                                          uint64_t generation) {
+  if (!state || !config || !sample_ends || count < 1 || !generation)
     return false;
+  uint64_t *ends = malloc((size_t)count * sizeof(*ends));
+  if (!ends)
+    return false;
+  memcpy(ends, sample_ends, (size_t)count * sizeof(*ends));
+
   pthread_mutex_lock(&state->state_mutex);
-  if (state->history_request_pending || state->history_busy) {
+  if (state->history_batch_pending || state->history_batch_busy) {
     pthread_mutex_unlock(&state->state_mutex);
+    free(ends);
     return false;
   }
-  state->history_config = *config;
-  state->history_sample_end = sample_end;
-  state->history_generation = generation;
-  state->history_request_pending = true;
+  state->history_batch_config = *config;
+  state->history_batch_ends = ends;
+  state->history_batch_count = count;
+  state->history_batch_generation = generation;
+  state->history_batch_epoch = atomic_load_explicit(&state->history_epoch,
+    memory_order_relaxed);
+  state->history_batch_pending = true;
   pthread_cond_signal(&state->request_cond);
   pthread_mutex_unlock(&state->state_mutex);
   return true;
 }
 
-/** Non-blockingly copy a completed historical analysis. */
-bool panadapter_fft_get_history_frame(struct panadapter_fft *state,
-                                      uint64_t generation,
-                                      struct panadapter_fft_frame *frame) {
-  if (!state || !generation || !frame || pthread_mutex_trylock(&state->state_mutex) != 0)
-    return false;
-  const bool available = state->published_history_frame.generation == generation;
-  if (available)
-    *frame = state->published_history_frame;
+/** Transfer ownership of a completed historical batch to the caller. */
+struct panadapter_fft_frame *panadapter_fft_take_history_batch(
+    struct panadapter_fft *state, uint64_t generation, int *count) {
+  if (!state || !generation || !count ||
+      pthread_mutex_trylock(&state->state_mutex) != 0)
+    return NULL;
+  struct panadapter_fft_frame *frames = NULL;
+  if (state->published_history_batch_generation == generation) {
+    frames = state->published_history_batch;
+    *count = state->published_history_batch_count;
+    state->published_history_batch = NULL;
+    state->published_history_batch_count = 0;
+    state->published_history_batch_generation = 0;
+  }
   pthread_mutex_unlock(&state->state_mutex);
-  return available;
+  return frames;
 }
 
 /** Estimate the age of the frame's effective observation center. */
@@ -496,6 +695,7 @@ int panadapter_fft_frame_latency_ms(const struct panadapter_fft_frame *frame) {
 void panadapter_fft_reset(struct panadapter_fft *state) {
   if (!state)
     return;
+  atomic_fetch_add_explicit(&state->history_epoch, 1, memory_order_relaxed);
   pthread_mutex_lock(&state->state_mutex);
   state->reset_smoothing = true;
   state->pending_serial++;
