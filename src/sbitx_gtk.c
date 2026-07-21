@@ -1184,6 +1184,8 @@ struct field main_controls[] = {
 
 	{"#wf_spd", do_wf_edit, 150, 20, 5, 50, "WFSPD", 50, "50", FIELD_NUMBER, STYLE_FIELD_VALUE,
 	 "", 20, 150, 5, 0},
+	{"#pan_direction", do_toggle_option, 1000, -1000, 70, 37, "PANDIR", 40, "VIEW", FIELD_TOGGLE, STYLE_FIELD_VALUE,
+	 "VIEW/WF", 0, 0, 0, 0},
 
 	{"#scope_gain", do_wf_edit, 25, 1, 1, 10, "SCOPEGAIN", 10, "1.0", FIELD_NUMBER, STYLE_FIELD_VALUE,
 	 "", 1, 25, 1, 0},
@@ -3576,6 +3578,14 @@ static void panadapter_view_refresh(const struct panadapter_view *previous)
 	invalidate_rect(waterfall->x, waterfall->y, waterfall->width, waterfall->height);
 }
 
+static int panadapter_arrow_direction(int control)
+{
+	int direction = control == PANADAPTER_LEFT ? -1 : 1;
+	if (!strcmp(field_str("PANDIR"), "WF"))
+		direction = -direction;
+	return direction;
+}
+
 static bool panadapter_control_enabled(int control)
 {
 	if (control == PANADAPTER_ZOOM_OUT)
@@ -3583,10 +3593,10 @@ static bool panadapter_control_enabled(int control)
 	if (control == PANADAPTER_ZOOM_IN)
 		return panadapter_view.zoom < PANADAPTER_VIEW_MAX_ZOOM - 1.0e-6;
 	const double pan_limit = 0.5 - 0.5 / panadapter_view.zoom;
-	if (control == PANADAPTER_LEFT)
-		return panadapter_view.center > -pan_limit + 1.0e-6;
-	if (control == PANADAPTER_RIGHT)
-		return panadapter_view.center < pan_limit - 1.0e-6;
+	if (control == PANADAPTER_LEFT || control == PANADAPTER_RIGHT)
+		return panadapter_arrow_direction(control) < 0
+			? panadapter_view.center > -pan_limit + 1.0e-6
+			: panadapter_view.center < pan_limit - 1.0e-6;
 	if (control == PANADAPTER_FULL)
 		return !panadapter_view_is_default(&panadapter_view);
 	return true;
@@ -3733,10 +3743,9 @@ static bool activate_panadapter_control(struct field *f, int pointer_x, int poin
 			panadapter_view_reset(&panadapter_view);
 		else if (control == PANADAPTER_FILTER)
 			panadapter_view = panadapter_filter_view();
-		else if (control == PANADAPTER_LEFT)
-			panadapter_view_pan(&panadapter_view, -0.15);
-		else if (control == PANADAPTER_RIGHT)
-			panadapter_view_pan(&panadapter_view, 0.15);
+		else if (control == PANADAPTER_LEFT || control == PANADAPTER_RIGHT)
+			panadapter_view_pan(&panadapter_view,
+				panadapter_arrow_direction(control) * 0.15);
 		else
 			panadapter_view_zoom_at(&panadapter_view,
 				control == PANADAPTER_ZOOM_IN ? 1.25 : 0.8, 0.5);
@@ -5594,6 +5603,7 @@ void menu2_display(int show) {
 		field_move("WFMIN", SC(5), screen_height - SC(80), SC(70), SC(37));
 		field_move("WFMAX", SC(5), screen_height - SC(40), SC(70), SC(37));
 		field_move("WFSPD", SC(80), screen_height - SC(80), SC(70), SC(37));
+		field_move("PANDIR", SC(80), screen_height - SC(40), SC(70), SC(37));
 		field_move("SCOPEGAIN", SC(170), screen_height - SC(80), SC(70), SC(37));
 		field_move("SCOPEAVG", SC(170), screen_height - SC(40), SC(70), SC(37));  // Add SCOPEAVG field
 		field_move("SCOPESIZE", SC(245), screen_height - SC(80), SC(70), SC(37)); // Add SCOPESIZE field
@@ -11844,6 +11854,13 @@ void do_control_action(char *cmd)
 			if (premute_volume[0])
 				set_field("r1:volume", premute_volume);
 		}
+	}
+	else if (!strncmp(request, "PANDIR", 6))
+	{
+		struct field *waterfall = get_field("waterfall");
+		if (waterfall)
+			update_field(waterfall);
+		settings_updated++;
 	}
 	else
 	{

@@ -134,6 +134,11 @@ first; on an external keyboard type \ directly. Press Enter to execute.
     2TONE  -- Two-tone test signal for SSB amplifier linearity testing
   Example: \mode LSB
 
+* \pandir view|wf
+  Sets what the waterfall arrow buttons move.
+  VIEW -- an arrow points in the direction the visible view moves (default).
+  WF   -- an arrow points in the direction the waterfall content moves.
+
 * \r
   Immediately switches the radio to receive mode.
   In FT8/FT4 mode, you can also press Ctrl+R to interrupt an active transmission
@@ -470,6 +475,11 @@ the spectrum display, waterfall appearance, and advanced hardware options.
   Controls the brightness/contrast of the spectrum and waterfall colours on screen.
   Increase if the display looks washed out; decrease if colours are too harsh.
   Adjust to suit your display and ambient lighting conditions. Default: 5.
+
+* PANDIR [view|wf]
+  Sets what the left and right arrow buttons move. VIEW treats the display like
+  a camera and moves the visible view in the arrow direction. WF moves the
+  waterfall content in the arrow direction. Default: VIEW.
 
 * SCOPEAVG [1-15]
   Sets the number of FFT frames averaged together to produce each line of the
