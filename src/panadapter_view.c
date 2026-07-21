@@ -78,3 +78,11 @@ int64_t panadapter_grid_first_hz(int64_t view_start_hz, int step_hz) {
     remainder += step_hz;
   return remainder ? view_start_hz + step_hz - remainder : view_start_hz;
 }
+
+int64_t panadapter_grid_label_hz(int64_t frequency_hz, int span_hz, int step_hz) {
+  const int resolution = span_hz >= 10000
+    ? (step_hz % 1000 == 0 ? 1000 : 100)
+    : step_hz >= 100 ? 100
+    : step_hz >= 10 ? 10 : 1;
+  return (int64_t)llround((double)frequency_hz / resolution) * resolution;
+}

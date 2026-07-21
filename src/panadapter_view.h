@@ -23,5 +23,6 @@ double panadapter_view_map_position(const struct panadapter_view *old_view,
                                     double new_position);
 int panadapter_grid_step_hz(int span_hz);
 int64_t panadapter_grid_first_hz(int64_t view_start_hz, int step_hz);
+int64_t panadapter_grid_label_hz(int64_t frequency_hz, int span_hz, int step_hz);
 
 #endif

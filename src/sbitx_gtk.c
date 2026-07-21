@@ -4291,8 +4291,9 @@ void draw_spectrum_grid(struct field *f_spectrum, cairo_t *gfx,
 	cairo_line_to(gfx, f->x + f->width, f->y + grid_height);
 	const int grid_step = panadapter_grid_step_hz(span_hz);
 	const int64_t view_stop = (int64_t)view_start + span_hz;
-	for (int64_t frequency = panadapter_grid_first_hz(view_start, grid_step);
-		 frequency <= view_stop; frequency += grid_step) {
+	for (int64_t nominal = panadapter_grid_first_hz(view_start - grid_step, grid_step);
+		 nominal <= view_stop + grid_step; nominal += grid_step) {
+		const int64_t frequency = panadapter_grid_label_hz(nominal, span_hz, grid_step);
 		if (frequency <= view_start || frequency >= view_stop)
 			continue;
 		const int grid_x = spectrum_frequency_x(f, frequency, view_start, span_hz);
@@ -4908,8 +4909,9 @@ void draw_spectrum(struct field *f_spectrum, cairo_t *gfx)
 
 	const int grid_step = panadapter_grid_step_hz(span_hz);
 	const int64_t view_stop = (int64_t)view_start + span_hz;
-	for (int64_t frequency = panadapter_grid_first_hz(view_start, grid_step);
-		 frequency <= view_stop; frequency += grid_step) {
+	for (int64_t nominal = panadapter_grid_first_hz(view_start - grid_step, grid_step);
+		 nominal <= view_stop + grid_step; nominal += grid_step) {
+		const int64_t frequency = panadapter_grid_label_hz(nominal, span_hz, grid_step);
 		if (frequency <= view_start || frequency >= view_stop)
 			continue;
 		const long label_frequency = (long)frequency;
