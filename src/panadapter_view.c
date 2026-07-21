@@ -60,7 +60,7 @@ double panadapter_view_map_position(const struct panadapter_view *old_view,
 int panadapter_grid_step_hz(int span_hz) {
   if (span_hz < 1)
     return 1;
-  const double target = span_hz / 10.0;
+  const double target = span_hz / (span_hz >= 10000 ? 8.0 : 10.0);
   const double magnitude = pow(10.0, floor(log10(target)));
   const double normalized = target / magnitude;
   const double nice = normalized < 1.5 ? 1.0
