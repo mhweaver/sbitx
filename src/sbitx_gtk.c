@@ -4916,12 +4916,7 @@ void draw_spectrum(struct field *f_spectrum, cairo_t *gfx)
 			continue;
 		const long label_frequency = (long)frequency;
 		if (span_hz >= 10000)
-		{
-			if (grid_step % 1000 == 0)
-				snprintf(freq_text, sizeof(freq_text), "%ld", label_frequency / 1000);
-			else
-				snprintf(freq_text, sizeof(freq_text), "%.1f", label_frequency / 1000.0);
-		}
+			snprintf(freq_text, sizeof(freq_text), "%ld", label_frequency / 1000);
 		else
 		{
 			double label_khz = (label_frequency % 1000000) / 1000.0;
