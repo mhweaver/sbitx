@@ -40,6 +40,8 @@ int main(void) {
   assert(panadapter_grid_step_hz(14700) == 2000);
   assert(panadapter_grid_step_hz(12500) == 2000);
   assert(panadapter_grid_step_hz(2200) == 200);
+  assert(panadapter_grid_step_hz(704) == 100);
+  assert(panadapter_grid_step_hz(3000) == 250);
   assert(panadapter_grid_step_hz(50) == 5);
   assert(panadapter_grid_first_hz(7087500, 2500) == 7087500);
   assert(panadapter_grid_first_hz(7087600, 2500) == 7090000);

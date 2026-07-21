@@ -63,11 +63,16 @@ int panadapter_grid_step_hz(int span_hz) {
   const double target = span_hz / (span_hz >= 10000 ? 8.0 : 10.0);
   const double magnitude = pow(10.0, floor(log10(target)));
   const double normalized = target / magnitude;
-  const double nice = normalized < 1.5 ? 1.0
+  double nice = normalized < 1.5 ? 1.0
     : normalized < 2.25 ? 2.0
     : normalized < 3.75 ? 2.5
     : normalized < 7.5 ? 5.0 : 10.0;
-  return (int)lround(nice * magnitude);
+  int step = (int)lround(nice * magnitude);
+  if ((int64_t)step * 12 < span_hz) {
+    nice = nice < 2.0 ? 2.0 : nice < 2.5 ? 2.5 : nice < 5.0 ? 5.0 : 10.0;
+    step = (int)lround(nice * magnitude);
+  }
+  return step;
 }
 
 int64_t panadapter_grid_first_hz(int64_t view_start_hz, int step_hz) {
