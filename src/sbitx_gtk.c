@@ -3464,6 +3464,10 @@ static bool waterfall_dragging;
 static uint64_t waterfall_live_sample_end;
 static float waterfall_color_offset;
 static guint waterfall_history_timer;
+static guint waterfall_history_debounce_timer;
+
+#define WATERFALL_HISTORY_DEBOUNCE_MS 100
+#define WATERFALL_HISTORY_ROWS_PER_TICK 4
 
 struct waterfall_history_row {
 	uint64_t sample_end;
@@ -3487,8 +3491,15 @@ static struct {
 	uint64_t sample_end;
 	uint64_t view_generation;
 } waterfall_history_request;
+static struct {
+	struct panadapter_fft_frame *frames;
+	int count;
+	int next;
+	uint64_t view_generation;
+} waterfall_history_render;
 
 static void waterfall_history_start(void);
+static void waterfall_history_schedule(void);
 
 enum panadapter_control {
 	PANADAPTER_ZOOM_OUT,
@@ -3500,7 +3511,8 @@ enum panadapter_control {
 	PANADAPTER_CONTROL_COUNT,
 };
 
-static void remap_waterfall(const struct panadapter_view *old_view,
+static __attribute__((optimize("O3"))) void remap_waterfall(
+							const struct panadapter_view *old_view,
 							const struct panadapter_view *new_view)
 {
 	if (!waterfall_map)
@@ -3512,33 +3524,49 @@ static void remap_waterfall(const struct panadapter_view *old_view,
 		return;
 	const size_t bytes = (size_t)width * height * 3;
 	guint8 *previous = malloc(bytes);
-	if (!previous) {
-		memset(waterfall_map, 0, bytes);
+	struct remap_column {
+		int left;
+		int right;
+		float mix;
+		bool valid;
+	} *columns = malloc((size_t)width * sizeof(*columns));
+	if (!previous || !columns) {
+		free(previous);
+		free(columns);
 		return;
 	}
 	memcpy(previous, waterfall_map, bytes);
 
+	for (int x = 0; x < width; x++) {
+		const double position = (x + 0.5) / width;
+		double old_x = panadapter_view_map_position(old_view, new_view, position)
+			* width - 0.5;
+		columns[x].valid = old_x >= -0.5 && old_x <= width - 0.5;
+		if (columns[x].valid) {
+			old_x = MAX(0.0, MIN(width - 1.0, old_x));
+			columns[x].left = (int)floor(old_x);
+			columns[x].right = MIN(width - 1, columns[x].left + 1);
+			columns[x].mix = old_x - columns[x].left;
+		}
+	}
+
 	for (int y = 0; y < height; y++) {
 		for (int x = 0; x < width; x++) {
-			const double position = (x + 0.5) / width;
-			double old_x = panadapter_view_map_position(old_view, new_view, position)
-				* width - 0.5;
 			guint8 *pixel = waterfall_map + ((size_t)y * width + x) * 3;
-			if (old_x < -0.5 || old_x > width - 0.5) {
+			if (!columns[x].valid) {
 				memset(pixel, 0, 3);
 				continue;
 			}
-			old_x = MAX(0.0, MIN(width - 1.0, old_x));
-			const int left = (int)floor(old_x);
-			const int right = MIN(width - 1, left + 1);
-			const double mix = old_x - left;
-			const guint8 *left_pixel = previous + ((size_t)y * width + left) * 3;
-			const guint8 *right_pixel = previous + ((size_t)y * width + right) * 3;
+			const guint8 *left_pixel = previous +
+				((size_t)y * width + columns[x].left) * 3;
+			const guint8 *right_pixel = previous +
+				((size_t)y * width + columns[x].right) * 3;
 			for (int channel = 0; channel < 3; channel++)
-				pixel[channel] = (guint8)lround(left_pixel[channel] * (1.0 - mix)
-					+ right_pixel[channel] * mix);
+				pixel[channel] = (guint8)(left_pixel[channel] +
+					(right_pixel[channel] - left_pixel[channel]) * columns[x].mix + 0.5f);
 		}
 	}
+	free(columns);
 	free(previous);
 }
 
@@ -3549,7 +3577,7 @@ static void panadapter_view_refresh(const struct panadapter_view *previous)
 	if (!waterfall_view_generation)
 		waterfall_view_generation++;
 	waterfall_history_config = spectrum_fft_config();
-	waterfall_history_start();
+	waterfall_history_schedule();
 	panadapter_fft_reset(panadapter_fft_context);
 	struct field *spectrum = get_field("spectrum");
 	struct field *waterfall = get_field("waterfall");
@@ -3925,6 +3953,12 @@ static void waterfall_render_history_row(struct field *f, int row,
 	}
 }
 
+static void waterfall_history_render_clear(void)
+{
+	free(waterfall_history_render.frames);
+	memset(&waterfall_history_render, 0, sizeof(waterfall_history_render));
+}
+
 static bool waterfall_history_update(struct field *f, float min_db,
 									  float max_db, float offset)
 {
@@ -3938,23 +3972,39 @@ static bool waterfall_history_update(struct field *f, float min_db,
 				waterfall_history_request.token, &frame_count);
 		if (frames) {
 			if (waterfall_history_request.view_generation == waterfall_view_generation) {
-				for (int result = 0; result < frame_count; result++) {
-					for (int row = 0; row < f->height; row++) {
-						if (waterfall_history_rows[row].sample_end !=
-							frames[result].sample_end ||
-							waterfall_history_rows[row].view_generation ==
-							waterfall_view_generation)
-							continue;
-						if (frames[result].count > 0)
-							waterfall_render_history_row(f, row, &frames[result],
-								min_db, max_db, offset);
-						waterfall_history_rows[row].view_generation =
-							waterfall_view_generation;
-					}
+				waterfall_history_render_clear();
+				waterfall_history_render.frames = frames;
+				waterfall_history_render.count = frame_count;
+				waterfall_history_render.view_generation = waterfall_view_generation;
+			} else
+				free(frames);
+			waterfall_history_request.active = false;
+		}
+	}
+
+	if (waterfall_history_render.frames) {
+		if (waterfall_history_render.view_generation != waterfall_view_generation)
+			waterfall_history_render_clear();
+		else {
+			const int end = MIN(waterfall_history_render.count,
+				waterfall_history_render.next + WATERFALL_HISTORY_ROWS_PER_TICK);
+			for (int result = waterfall_history_render.next; result < end; result++) {
+				for (int row = 0; row < f->height; row++) {
+					if (waterfall_history_rows[row].sample_end !=
+						waterfall_history_render.frames[result].sample_end ||
+						waterfall_history_rows[row].view_generation ==
+						waterfall_view_generation)
+						continue;
+					if (waterfall_history_render.frames[result].count > 0)
+						waterfall_render_history_row(f, row,
+							&waterfall_history_render.frames[result], min_db, max_db, offset);
+					waterfall_history_rows[row].view_generation = waterfall_view_generation;
 				}
 			}
-			free(frames);
-			waterfall_history_request.active = false;
+			waterfall_history_render.next = end;
+			if (end < waterfall_history_render.count)
+				return true;
+			waterfall_history_render_clear();
 		}
 	}
 
@@ -4021,6 +4071,10 @@ static gboolean waterfall_history_tick(gpointer unused)
 
 static void waterfall_history_start(void)
 {
+	if (waterfall_history_debounce_timer) {
+		g_source_remove(waterfall_history_debounce_timer);
+		waterfall_history_debounce_timer = 0;
+	}
 	if (!waterfall_dragging && waterfall_history_map &&
 		waterfall_history_map_generation != waterfall_view_generation) {
 		memcpy(waterfall_history_map, waterfall_map,
@@ -4029,6 +4083,28 @@ static void waterfall_history_start(void)
 	}
 	if (!waterfall_history_timer)
 		waterfall_history_timer = g_timeout_add(1, waterfall_history_tick, NULL);
+}
+
+static gboolean waterfall_history_debounce_tick(gpointer unused)
+{
+	(void)unused;
+	if (waterfall_dragging)
+		return G_SOURCE_CONTINUE;
+	waterfall_history_debounce_timer = 0;
+	waterfall_history_start();
+	return G_SOURCE_REMOVE;
+}
+
+static void waterfall_history_schedule(void)
+{
+	if (waterfall_history_timer) {
+		g_source_remove(waterfall_history_timer);
+		waterfall_history_timer = 0;
+	}
+	if (waterfall_history_debounce_timer)
+		g_source_remove(waterfall_history_debounce_timer);
+	waterfall_history_debounce_timer = g_timeout_add(
+		WATERFALL_HISTORY_DEBOUNCE_MS, waterfall_history_debounce_tick, NULL);
 }
 
 void draw_tx_meters(struct field *f, cairo_t *gfx)
