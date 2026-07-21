@@ -56,3 +56,25 @@ double panadapter_view_map_position(const struct panadapter_view *old_view,
   const double frequency = new_view->center + (new_position - 0.5) / new_view->zoom;
   return 0.5 + (frequency - old_view->center) * old_view->zoom;
 }
+
+int panadapter_grid_step_hz(int span_hz) {
+  if (span_hz < 1)
+    return 1;
+  const double target = span_hz / 10.0;
+  const double magnitude = pow(10.0, floor(log10(target)));
+  const double normalized = target / magnitude;
+  const double nice = normalized < 1.5 ? 1.0
+    : normalized < 2.25 ? 2.0
+    : normalized < 3.75 ? 2.5
+    : normalized < 7.5 ? 5.0 : 10.0;
+  return (int)lround(nice * magnitude);
+}
+
+int64_t panadapter_grid_first_hz(int64_t view_start_hz, int step_hz) {
+  if (step_hz < 1)
+    return view_start_hz;
+  int64_t remainder = view_start_hz % step_hz;
+  if (remainder < 0)
+    remainder += step_hz;
+  return remainder ? view_start_hz + step_hz - remainder : view_start_hz;
+}

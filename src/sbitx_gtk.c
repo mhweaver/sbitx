@@ -2434,15 +2434,6 @@ static int spectrum_frequency_x(const struct field *f, int64_t frequency,
 	return f->x + (int)(offset * f->width / span_hz);
 }
 
-// Round a grid division to the frequency precision shown by its label.
-static long spectrum_grid_frequency(long view_start, int span_hz, int division)
-{
-	const int resolution = span_hz >= 10000 ? 1000
-		: span_hz >= 1000 ? 100 : span_hz >= 100 ? 10 : 1;
-	const long frequency = view_start + (int64_t)span_hz * division / 10;
-	return ((frequency + resolution / 2) / resolution) * resolution;
-}
-
 static int spectrum_tuned_x(const struct field *f, long tuned_freq,
 							long view_start, int span_hz)
 {
@@ -4293,14 +4284,18 @@ void draw_spectrum_grid(struct field *f_spectrum, cairo_t *gfx,
 		cairo_line_to(gfx, f->x + f->width, grid_y);
 	}
 
-	// draw the vertical grid
-	for (int division = 0; division <= 10; division++)
-	{
-		int grid_x = f->x + (f->width * division) / 10;
-		if (division > 0 && division < 10)
-			grid_x = spectrum_frequency_x(f,
-							spectrum_grid_frequency(view_start, span_hz, division),
-							view_start, span_hz);
+	// Anchor vertical lines to absolute frequencies so scrolling moves the grid.
+	cairo_move_to(gfx, f->x, f->y);
+	cairo_line_to(gfx, f->x, f->y + grid_height);
+	cairo_move_to(gfx, f->x + f->width, f->y);
+	cairo_line_to(gfx, f->x + f->width, f->y + grid_height);
+	const int grid_step = panadapter_grid_step_hz(span_hz);
+	const int64_t view_stop = (int64_t)view_start + span_hz;
+	for (int64_t frequency = panadapter_grid_first_hz(view_start, grid_step);
+		 frequency <= view_stop; frequency += grid_step) {
+		if (frequency <= view_start || frequency >= view_stop)
+			continue;
+		const int grid_x = spectrum_frequency_x(f, frequency, view_start, span_hz);
 		cairo_move_to(gfx, grid_x, f->y);
 		cairo_line_to(gfx, grid_x, f->y + grid_height);
 	}
@@ -4911,17 +4906,29 @@ void draw_spectrum(struct field *f_spectrum, cairo_t *gfx)
 	cairo_set_source_rgb(gfx, palette[COLOR_TEXT_MUTED][0],
 					 palette[COLOR_TEXT_MUTED][1], palette[COLOR_TEXT_MUTED][2]);
 
-	for (int division = 1; division < 10; division++)
-	{
-		long label_frequency = spectrum_grid_frequency(view_start, span_hz, division);
+	const int grid_step = panadapter_grid_step_hz(span_hz);
+	const int64_t view_stop = (int64_t)view_start + span_hz;
+	for (int64_t frequency = panadapter_grid_first_hz(view_start, grid_step);
+		 frequency <= view_stop; frequency += grid_step) {
+		if (frequency <= view_start || frequency >= view_stop)
+			continue;
+		const long label_frequency = (long)frequency;
 		if (span_hz >= 10000)
 		{
-			sprintf(freq_text, "%ld", label_frequency / 1000);
+			if (grid_step % 1000 == 0)
+				snprintf(freq_text, sizeof(freq_text), "%ld", label_frequency / 1000);
+			else
+				snprintf(freq_text, sizeof(freq_text), "%.1f", label_frequency / 1000.0);
 		}
 		else
 		{
 			double label_khz = (label_frequency % 1000000) / 1000.0;
-			sprintf(freq_text, "%5.1f", label_khz);
+			if (grid_step >= 100)
+				snprintf(freq_text, sizeof(freq_text), "%5.1f", label_khz);
+			else if (grid_step >= 10)
+				snprintf(freq_text, sizeof(freq_text), "%6.2f", label_khz);
+			else
+				snprintf(freq_text, sizeof(freq_text), "%7.3f", label_khz);
 		}
 		const int label_x = spectrum_frequency_x(f, label_frequency, view_start, span_hz);
 		int off = measure_text(gfx, freq_text, STYLE_SMALL) / 2;

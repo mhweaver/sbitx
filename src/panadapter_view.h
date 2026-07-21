@@ -2,6 +2,7 @@
 #define PANADAPTER_VIEW_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #define PANADAPTER_VIEW_MAX_ZOOM 500.0
 
@@ -20,5 +21,7 @@ void panadapter_view_fit(struct panadapter_view *view, double start, double stop
 double panadapter_view_map_position(const struct panadapter_view *old_view,
                                     const struct panadapter_view *new_view,
                                     double new_position);
+int panadapter_grid_step_hz(int span_hz);
+int64_t panadapter_grid_first_hz(int64_t view_start_hz, int step_hz);
 
 #endif

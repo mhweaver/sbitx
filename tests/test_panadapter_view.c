@@ -36,6 +36,14 @@ int main(void) {
   assert(panadapter_view_span_hz(&view, 25000) == 2200);
   assert(panadapter_view_center_hz(&view, 25000) == 1200);
 
+  assert(panadapter_grid_step_hz(25000) == 2500);
+  assert(panadapter_grid_step_hz(12500) == 1000);
+  assert(panadapter_grid_step_hz(2200) == 200);
+  assert(panadapter_grid_step_hz(50) == 5);
+  assert(panadapter_grid_first_hz(7087500, 2500) == 7087500);
+  assert(panadapter_grid_first_hz(7087600, 2500) == 7090000);
+  assert(panadapter_grid_first_hz(-1200, 500) == -1000);
+
   puts("panadapter view tests passed");
   return 0;
 }
