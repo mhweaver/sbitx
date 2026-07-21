@@ -24,6 +24,13 @@ $(TARGET): $(OBJECTS) ft8_lib/libft8.a
 src/mongoose.o: src/mongoose.c
 	$(CC) -c $(CFLAGS) $(DEBUGFLAGS) $(INCPATH) $(MONGOOSE_FLAGS) -o $@ $<
 
+src/panadapter_fft.o: src/panadapter_fft.c
+ifdef SBITX_DEBUG
+	$(CC) -c $(CFLAGS) $(DEBUGFLAGS) $(INCPATH) -o $@ $<
+else
+	$(CC) -c $(CFLAGS) $(DEBUGFLAGS) $(INCPATH) -O3 -o $@ $<
+endif
+
 .c.o:
 	$(CC) -c $(CFLAGS) $(DEBUGFLAGS) $(INCPATH) -o $@ $<
 
@@ -43,6 +50,10 @@ test:
 	echo $(ALL_SOURCES)
 	echo $(OBJECTS)
 
-test-zoom-fft:
-	$(CC) -O2 -Isrc -o /tmp/sbitx-test-zoom-fft tests/test_zoom_fft.c src/zoom_fft.c -lfftw3f -lm -pthread
-	/tmp/sbitx-test-zoom-fft
+test-panadapter-fft:
+	$(CC) -O2 -Isrc -o /tmp/sbitx-$@ tests/test_panadapter_fft.c src/panadapter_fft.c -lfftw3f -lm -pthread
+	/tmp/sbitx-$@
+
+test-panadapter-view:
+	$(CC) -O2 -Isrc -o /tmp/sbitx-$@ tests/test_panadapter_view.c src/panadapter_view.c -lm
+	/tmp/sbitx-$@
