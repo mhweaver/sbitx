@@ -5717,7 +5717,7 @@ static void layout_ui()
   field_move("DRIVE", x2 - SC(87), SC(50), SC(42), SC(40));
   field_move("BW", x2 - SC(127), SC(50), SC(40), SC(40));
   field_move("AGC", x2 - SC(170), SC(50), SC(42), SC(40));
-  field_move("RIT", x2 - SC(295), SC(50), SC(40), SC(40));
+  field_move("RIT", x2 - SC(292), SC(50), SC(40), SC(40));
   field_move("SPLIT", x2 - SC(252), SC(50), SC(40), SC(40));
 
   // MENU occupies TUNE's former top-row slot. REC remains beside it in the
