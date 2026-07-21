@@ -9645,16 +9645,17 @@ static gboolean on_scroll(GtkWidget *widget, GdkEventScroll *event, gpointer dat
 
 	if (hoverField)
 	{
+		double delta_x = 0.0;
+		double delta_y = 0.0;
+		if (!gdk_event_get_scroll_deltas((GdkEvent *)event, &delta_x, &delta_y)) {
+			if (event->direction == GDK_SCROLL_UP) delta_y = -1.0;
+			if (event->direction == GDK_SCROLL_DOWN) delta_y = 1.0;
+			if (event->direction == GDK_SCROLL_LEFT) delta_x = -1.0;
+			if (event->direction == GDK_SCROLL_RIGHT) delta_x = 1.0;
+		}
+
 		if (!strcmp(hoverField->cmd, "spectrum") || !strcmp(hoverField->cmd, "waterfall")) {
 			const struct panadapter_view previous = panadapter_view;
-			double delta_x = 0.0;
-			double delta_y = 0.0;
-			if (!gdk_event_get_scroll_deltas((GdkEvent *)event, &delta_x, &delta_y)) {
-				if (event->direction == GDK_SCROLL_UP) delta_y = -1.0;
-				if (event->direction == GDK_SCROLL_DOWN) delta_y = 1.0;
-				if (event->direction == GDK_SCROLL_LEFT) delta_x = -1.0;
-				if (event->direction == GDK_SCROLL_RIGHT) delta_x = 1.0;
-			}
 			if (fabs(delta_y) > 0.001) {
 				const double position = (event->x - hoverField->x) / hoverField->width;
 				panadapter_view_zoom_at(&panadapter_view, pow(1.25, -delta_y), position);
@@ -9668,20 +9669,11 @@ static gboolean on_scroll(GtkWidget *widget, GdkEventScroll *event, gpointer dat
 		}
 
 		const bool reverse = !strcmp(get_field("reverse_scrolling")->value, "ON");
-		//printf("scroll @%lf, %lf; direction %d reverse? %d field %s\n", event->x, event->y, event->direction, reverse, hoverField->label);
-		if (event->direction == 0)
-		{
+		if (fabs(delta_y) > 0.001) {
+			bool scroll_up = delta_y < 0.0;
 			if (reverse)
-				edit_field(hoverField, MIN_KEY_DOWN);
-			else
-				edit_field(hoverField, MIN_KEY_UP);
-		}
-		else
-		{
-			if (reverse)
-				edit_field(hoverField, MIN_KEY_UP);
-			else
-				edit_field(hoverField, MIN_KEY_DOWN);
+				scroll_up = !scroll_up;
+			edit_field(hoverField, scroll_up ? MIN_KEY_UP : MIN_KEY_DOWN);
 		}
 	}
 	return FALSE;
