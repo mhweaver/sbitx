@@ -3691,14 +3691,22 @@ static void draw_panadapter_controls(struct field *f, cairo_t *gfx)
 	cairo_restore(gfx);
 }
 
-static bool activate_panadapter_control(struct field *f, int pointer_x, int pointer_y)
+static int panadapter_control_at(struct field *f, int pointer_x, int pointer_y)
 {
 	for (int control = 0; control < PANADAPTER_CONTROL_COUNT; control++) {
 		int x, y, size;
 		panadapter_control_rect(f, control, &x, &y, &size);
-		if (pointer_x < x || pointer_x >= x + size || pointer_y < y || pointer_y >= y + size)
-			continue;
+		if (pointer_x >= x && pointer_x < x + size
+			&& pointer_y >= y && pointer_y < y + size)
+			return control;
+	}
+	return -1;
+}
 
+static bool activate_panadapter_control(struct field *f, int pointer_x, int pointer_y)
+{
+	const int control = panadapter_control_at(f, pointer_x, pointer_y);
+	if (control >= 0) {
 		const struct panadapter_view previous = panadapter_view;
 		if (!panadapter_control_enabled(control))
 			return true;
@@ -6626,6 +6634,19 @@ int do_waterfall(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
 		if (activate_panadapter_control(f, a, b))
 			return 1;
 		waterfall_dragging = true;
+		return 1;
+	}
+	if (event == GDK_2BUTTON_PRESS && c == GDK_BUTTON_PRIMARY) {
+		waterfall_dragging = false;
+		if (panadapter_control_at(f, a, b) >= 0)
+			return 1;
+		const struct panadapter_view previous = panadapter_view;
+		const double position = MAX(0.0, MIN(1.0, (double)(a - f->x) / f->width));
+		panadapter_view_zoom_at(&panadapter_view, 2.0, position);
+		panadapter_view_pan(&panadapter_view, position - 0.5);
+		if (fabs(previous.zoom - panadapter_view.zoom) > 0.001
+			|| fabs(previous.center - panadapter_view.center) > 0.0001)
+			panadapter_view_refresh(&previous);
 		return 1;
 	}
 
@@ -9655,6 +9676,21 @@ static gboolean on_mouse_press(GtkWidget *widget, GdkEventButton *event, gpointe
 	{
 		mouse_down = 0;
 		// puts("mouse up in on_mouse_press");
+	}
+	else if (event->type == GDK_2BUTTON_PRESS)
+	{
+		for (int i = 0; active_layout[i].cmd[0] > 0; i++)
+		{
+			f = active_layout + i;
+			if (!strcmp(f->cmd, "waterfall")
+				&& f->x < event->x && event->x < f->x + f->width
+				&& f->y < event->y && event->y < f->y + f->height)
+			{
+				if (f->fn)
+					f->fn(f, NULL, GDK_2BUTTON_PRESS, event->x, event->y, event->button);
+				break;
+			}
+		}
 	}
 	else if (event->type == GDK_BUTTON_PRESS /*&& event->button == GDK_BUTTON_PRIMARY*/)
 	{
