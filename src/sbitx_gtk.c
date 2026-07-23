@@ -3630,15 +3630,24 @@ static void draw_panadapter_control(struct field *f, cairo_t *gfx, int control)
 	const double cy = y + size / 2.0;
 
 	cairo_save(gfx);
-	cairo_set_source_rgba(gfx, 0.05, 0.05, 0.05, 0.82);
+	cairo_set_source_rgba(gfx, palette[COLOR_BACKGROUND][0],
+		palette[COLOR_BACKGROUND][1], palette[COLOR_BACKGROUND][2], 0.82);
 	cairo_rectangle(gfx, x, y, size, size);
 	cairo_fill_preserve(gfx);
 	const bool enabled = panadapter_control_enabled(control);
-	cairo_set_source_rgba(gfx, 1.0, 1.0, 1.0, enabled ? 0.85 : 0.28);
+	cairo_set_source_rgb(gfx, palette[COLOR_CONTROL_BOX][0],
+		palette[COLOR_CONTROL_BOX][1], palette[COLOR_CONTROL_BOX][2]);
 	cairo_set_line_width(gfx, MAX(1.5, size / 16.0));
 	cairo_set_line_cap(gfx, CAIRO_LINE_CAP_ROUND);
 	cairo_set_line_join(gfx, CAIRO_LINE_JOIN_ROUND);
 	cairo_stroke(gfx);
+	if (enabled) {
+		const struct font_style *style = &font_table[STYLE_SMALL_FIELD_VALUE];
+		cairo_set_source_rgb(gfx, style->r, style->g, style->b);
+	} else {
+		cairo_set_source_rgb(gfx, palette[COLOR_TEXT_MUTED][0],
+			palette[COLOR_TEXT_MUTED][1], palette[COLOR_TEXT_MUTED][2]);
+	}
 
 	if (control == PANADAPTER_LEFT || control == PANADAPTER_RIGHT) {
 		const double direction = control == PANADAPTER_LEFT ? -1.0 : 1.0;
@@ -3704,17 +3713,19 @@ static void draw_panadapter_controls(struct field *f, cairo_t *gfx)
 		snprintf(bandwidth, sizeof(bandwidth), "%d Hz", span_hz);
 
 	cairo_save(gfx);
-	cairo_select_font_face(gfx, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
-	cairo_set_font_size(gfx, SC(11));
+	const struct font_style *style = &font_table[STYLE_SMALL_FIELD_VALUE];
+	cairo_select_font_face(gfx, style->name, style->type, style->weight);
+	cairo_set_font_size(gfx, style->height);
 	cairo_text_extents_t extents;
 	cairo_text_extents(gfx, bandwidth, &extents);
 	const double text_x = x + size + SC(7);
 	const double text_y = y + (size - extents.height) / 2.0 - extents.y_bearing;
-	cairo_set_source_rgba(gfx, 0.05, 0.05, 0.05, 0.82);
+	cairo_set_source_rgba(gfx, palette[COLOR_BACKGROUND][0],
+		palette[COLOR_BACKGROUND][1], palette[COLOR_BACKGROUND][2], 0.82);
 	cairo_rectangle(gfx, text_x - SC(4), text_y + extents.y_bearing - SC(3),
 		extents.width + SC(8), extents.height + SC(6));
 	cairo_fill(gfx);
-	cairo_set_source_rgba(gfx, 1.0, 1.0, 1.0, 0.85);
+	cairo_set_source_rgb(gfx, style->r, style->g, style->b);
 	cairo_move_to(gfx, text_x, text_y);
 	cairo_show_text(gfx, bandwidth);
 	cairo_restore(gfx);
