@@ -79,7 +79,6 @@ static bool fft_configs_equal(const struct panadapter_fft_config *a, const struc
   return a->display_span_hz == b->display_span_hz
          && a->center_hz == b->center_hz
          && a->is_cw == b->is_cw
-         && a->is_tx == b->is_tx
          && a->display_width_px == b->display_width_px
          && (!a->is_cw || a->wpm == b->wpm);
 }
@@ -146,6 +145,119 @@ static void make_filter(struct panadapter_fft *state, int bandwidth_hz) {
     state->filter_coeff[tap] /= (float) sum;
 }
 
+struct analysis_layout {
+  int decimation;
+  int target_bins;
+  int fft_bins;
+  int observed;
+  int raw_count;
+  int half_bins;
+  int visible_bins;
+  double bin_hz;
+  float length_scale;
+};
+
+/** Derive and prepare the analysis parameters shared by live and historical frames. */
+static bool prepare_analysis(struct panadapter_fft *state,
+                             const struct panadapter_fft_config *config,
+                             struct analysis_layout *layout) {
+  if (config->display_span_hz < 1 || config->display_width_px < 1)
+    return false;
+
+  const int bandwidth = config->display_span_hz > MIN_ANALYSIS_BANDWIDTH
+                          ? config->display_span_hz : MIN_ANALYSIS_BANDWIDTH;
+  const int guarded_decimation = (100 * SDR_SAMPLE_RATE) /
+    (DECIMATION_GUARD_PERCENT * bandwidth);
+  layout->decimation = guarded_decimation > 0 ? guarded_decimation : 1;
+  const double output_rate = (double)SDR_SAMPLE_RATE / layout->decimation;
+  layout->target_bins = config->display_width_px < PANADAPTER_FFT_FRAME_BINS
+                          ? config->display_width_px : PANADAPTER_FFT_FRAME_BINS;
+
+  layout->fft_bins = PANADAPTER_FFT_MIN_BINS;
+  while (layout->fft_bins < PANADAPTER_FFT_MAX_BINS) {
+    const double bin_hz = output_rate / layout->fft_bins;
+    const int half_bins = (int)floor(config->display_span_hz / (2.0 * bin_hz));
+    if (2 * half_bins + 1 >= layout->target_bins)
+      break;
+    layout->fft_bins *= 2;
+  }
+  if (!ensure_fft_plan(state, layout->fft_bins))
+    return false;
+
+  layout->observed = observation_samples(config, layout->decimation,
+                                          layout->fft_bins);
+  layout->raw_count = (layout->observed - 1) * layout->decimation + FILTER_TAPS;
+  layout->bin_hz = output_rate / layout->fft_bins;
+  layout->half_bins = (int)floor(config->display_span_hz /
+                                  (2.0 * layout->bin_hz));
+  const int max_half_bins = layout->fft_bins > 1
+                              ? layout->fft_bins / 2 - 1 : 0;
+  if (layout->half_bins > max_half_bins)
+    layout->half_bins = max_half_bins;
+  layout->visible_bins = 2 * layout->half_bins + 1;
+  layout->length_scale = sqrtf((float)(FFT_LEVEL_REFERENCE_BINS *
+    layout->decimation) / layout->observed);
+
+  if (bandwidth != state->filter_bandwidth_hz) {
+    make_filter(state, bandwidth);
+    state->filter_bandwidth_hz = bandwidth;
+  }
+  return true;
+}
+
+/** Convert the current FFT output into a display frame. */
+static void fill_frame(struct panadapter_fft *state,
+                       const struct panadapter_fft_config *config,
+                       const struct analysis_layout *layout, bool smooth,
+                       uint64_t sample_end, uint64_t sample_end_ms,
+                       struct panadapter_fft_frame *frame) {
+  frame->count = layout->visible_bins < layout->target_bins
+                   ? layout->visible_bins : layout->target_bins;
+  frame->first_hz = config->center_hz + layout->half_bins * layout->bin_hz;
+  frame->bin_step_hz = frame->count > 1
+    ? -(layout->visible_bins - 1) * layout->bin_hz / (frame->count - 1)
+    : -layout->bin_hz;
+  frame->decimation = layout->decimation;
+  frame->observation_samples = layout->observed;
+  frame->fft_bins = layout->fft_bins;
+  frame->sample_end = sample_end;
+  frame->sample_end_ms = sample_end_ms;
+  frame->config = *config;
+
+  if (smooth && (!state->smoothed_config_valid ||
+                 !fft_configs_equal(config, &state->smoothed_config))) {
+    memset(state->smoothed_bins, 0, sizeof(state->smoothed_bins));
+    state->smoothed_config = *config;
+    state->smoothed_config_valid = true;
+  }
+
+  const float new_frame_weight = !smooth || config->is_cw
+                                   ? 1.0f : NON_CW_NEW_FRAME_WEIGHT;
+  for (int output = 0; output < frame->count; output++) {
+    const int first_visible = output * layout->visible_bins / frame->count;
+    const int end_visible = (output + 1) * layout->visible_bins / frame->count;
+    float magnitude = 0.0f;
+    for (int visible = first_visible; visible < end_visible; visible++) {
+      const int signed_bin = layout->half_bins - visible;
+      const int fft_bin = signed_bin >= 0
+                            ? signed_bin : layout->fft_bins + signed_bin;
+      magnitude = fmaxf(magnitude, cabsf(state->fft_data[fft_bin]));
+    }
+    if (smooth) {
+      state->smoothed_bins[output] = (1.0f - new_frame_weight) *
+        state->smoothed_bins[output] + new_frame_weight * magnitude;
+      magnitude = state->smoothed_bins[output];
+    }
+    frame->bins[output] = (int)lroundf(20.0f *
+      log10f(fmaxf(magnitude, 1.0e-12f)));
+  }
+}
+
+static float hann_window(int index, int count) {
+  return count == 1 ? 1.0f :
+    0.5f - 0.5f * cosf(2.0f * (float)M_PI * index / (count - 1));
+}
+
 /** Copy a current or historical analysis window without blocking audio. */
 static bool snapshot_samples(struct panadapter_fft *state, int count,
                              uint64_t requested_end, uint64_t *first_sample,
@@ -199,118 +311,41 @@ static void shift_buffer(fftwf_complex *samples, int count, int center_hz,
   }
 }
 
-static void shift_samples(struct panadapter_fft *state, int count,
-                          int center_hz, uint64_t first_sample) {
-  shift_buffer(state->raw_work, count, center_hz, first_sample);
-}
-
 /** Produce one cropped, smoothed display spectrum from the newest samples. */
 static bool analyze(struct panadapter_fft *state,
                     const struct panadapter_fft_config *config,
                     uint64_t requested_end, bool smooth,
                     struct panadapter_fft_frame *frame) {
-  if (config->display_span_hz < 1 || config->display_width_px < 1)
+  struct analysis_layout layout;
+  if (!prepare_analysis(state, config, &layout))
     return false;
 
-  const int bandwidth = config->display_span_hz > MIN_ANALYSIS_BANDWIDTH
-                          ? config->display_span_hz
-                          : MIN_ANALYSIS_BANDWIDTH;
-  const int guarded_decimation = (100 * SDR_SAMPLE_RATE) / (DECIMATION_GUARD_PERCENT * bandwidth);
-  const int decimation = guarded_decimation > 0 ? guarded_decimation : 1;
-  const double output_rate = (double) SDR_SAMPLE_RATE / decimation;
-  const int target_bins = config->display_width_px < PANADAPTER_FFT_FRAME_BINS
-                            ? config->display_width_px
-                            : PANADAPTER_FFT_FRAME_BINS;
-  /* Use the smallest FFT that supplies at least one visible bin per pixel. */
-  int fft_bins = PANADAPTER_FFT_MIN_BINS;
-  while (fft_bins < PANADAPTER_FFT_MAX_BINS) {
-    const double bin_hz = output_rate / fft_bins;
-    const int half_bins = (int) floor(config->display_span_hz / (2.0 * bin_hz));
-    if (2 * half_bins + 1 >= target_bins)
-      break;
-    fft_bins *= 2;
-  }
-  if (!ensure_fft_plan(state, fft_bins))
-    return false;
-
-  const int observed = observation_samples(config, decimation, fft_bins);
-  const int raw_count = (observed - 1) * decimation + FILTER_TAPS;
   uint64_t first_sample;
   uint64_t sample_end;
   uint64_t sample_end_ms;
 
-  if (!snapshot_samples(state, raw_count, requested_end, &first_sample,
+  if (!snapshot_samples(state, layout.raw_count, requested_end, &first_sample,
                         &sample_end, &sample_end_ms))
     return false;
 
-  if (bandwidth != state->filter_bandwidth_hz) {
-    make_filter(state, bandwidth);
-    state->filter_bandwidth_hz = bandwidth;
-  }
-  shift_samples(state, raw_count, config->center_hz, first_sample);
-  memset(state->fft_data, 0, sizeof(*state->fft_data) * fft_bins);
+  shift_buffer(state->raw_work, layout.raw_count, config->center_hz,
+               first_sample);
+  memset(state->fft_data, 0, sizeof(*state->fft_data) * layout.fft_bins);
 
   /* Keep the level stable across observation lengths and decimation. */
-  const float length_scale = sqrtf((float) (FFT_LEVEL_REFERENCE_BINS * decimation) / (float) observed);
-  for (int output = 0; output < observed; output++) {
-    const int newest = FILTER_TAPS - 1 + output * decimation;
+  for (int output = 0; output < layout.observed; output++) {
+    const int newest = FILTER_TAPS - 1 + output * layout.decimation;
     fftwf_complex sum = 0.0f;
     for (int tap = 0; tap < FILTER_TAPS; tap++) {
       const int input = newest - tap;
       sum += state->filter_coeff[tap] * state->raw_work[input];
     }
-    const float window = observed == 1
-                           ? 1.0f
-                           : 0.5f - 0.5f * cosf(2.0f * (float) M_PI * (float) output / (float) (observed - 1));
-    state->fft_data[output] = sum * window * length_scale;
+    state->fft_data[output] = sum *
+      hann_window(output, layout.observed) * layout.length_scale;
   }
 
   fftwf_execute(state->fft_plan);
-
-  if (smooth && (!state->smoothed_config_valid ||
-                 !fft_configs_equal(config, &state->smoothed_config))) {
-    memset(state->smoothed_bins, 0, sizeof(state->smoothed_bins));
-    state->smoothed_config = *config;
-    state->smoothed_config_valid = true;
-  }
-
-  const double bin_hz = output_rate / fft_bins;
-  int half_bins = (int) floor(config->display_span_hz / (2.0 * bin_hz));
-  const int max_half_bins = fft_bins > 1 ? fft_bins / 2 - 1 : 0;
-  if (half_bins > max_half_bins)
-    half_bins = max_half_bins;
-  const int visible_bins = 2 * half_bins + 1;
-  frame->count = visible_bins < target_bins ? visible_bins : target_bins;
-  frame->first_hz = config->center_hz + half_bins * bin_hz;
-  frame->bin_step_hz = frame->count > 1
-                         ? -(visible_bins - 1) * bin_hz / (frame->count - 1)
-                         : -bin_hz;
-  frame->decimation = decimation;
-  frame->observation_samples = observed;
-  frame->fft_bins = fft_bins;
-  frame->sample_end = sample_end;
-  frame->sample_end_ms = sample_end_ms;
-  frame->config = *config;
-
-  // CW timing belongs in the waterfall rows, not a multi-frame magnitude tail.
-  const float new_frame_weight = !smooth || config->is_cw
-                                   ? 1.0f : NON_CW_NEW_FRAME_WEIGHT;
-  for (int output = 0; output < frame->count; output++) {
-    const int first_visible = output * visible_bins / frame->count;
-    const int end_visible = (output + 1) * visible_bins / frame->count;
-    float magnitude = 0.0f;
-    for (int visible = first_visible; visible < end_visible; visible++) {
-      const int signed_bin = half_bins - visible;
-      const int fft_bin = signed_bin >= 0 ? signed_bin : fft_bins + signed_bin;
-      magnitude = fmaxf(magnitude, cabsf(state->fft_data[fft_bin]));
-    }
-    if (smooth) {
-      state->smoothed_bins[output] = (1.0f - new_frame_weight) *
-        state->smoothed_bins[output] + new_frame_weight * magnitude;
-      magnitude = state->smoothed_bins[output];
-    }
-    frame->bins[output] = (int) lroundf(20.0f * log10f(fmaxf(magnitude, 1.0e-12f)));
-  }
+  fill_frame(state, config, &layout, smooth, sample_end, sample_end_ms, frame);
   return true;
 }
 
@@ -318,9 +353,10 @@ static bool analyze(struct panadapter_fft *state,
 static struct panadapter_fft_frame *analyze_history_batch(
     struct panadapter_fft *state, const struct panadapter_fft_config *config,
     const uint64_t *sample_ends, int count, uint64_t history_epoch) {
+  if (count < 1)
+    return NULL;
   struct panadapter_fft_frame *frames = calloc((size_t)count, sizeof(*frames));
-  if (!frames || count < 1 || config->display_span_hz < 1 ||
-      config->display_width_px < 1)
+  if (!frames)
     return frames;
   for (int row = 0; row < count; row++) {
     frames[row].sample_end = sample_ends[row];
@@ -330,37 +366,21 @@ static struct panadapter_fft_frame *analyze_history_batch(
       history_epoch)
     return frames;
 
-  const int bandwidth = config->display_span_hz > MIN_ANALYSIS_BANDWIDTH
-                          ? config->display_span_hz : MIN_ANALYSIS_BANDWIDTH;
-  const int guarded_decimation = (100 * SDR_SAMPLE_RATE) /
-    (DECIMATION_GUARD_PERCENT * bandwidth);
-  const int decimation = guarded_decimation > 0 ? guarded_decimation : 1;
-  const double output_rate = (double)SDR_SAMPLE_RATE / decimation;
-  const int target_bins = config->display_width_px < PANADAPTER_FFT_FRAME_BINS
-                            ? config->display_width_px : PANADAPTER_FFT_FRAME_BINS;
-  int fft_bins = PANADAPTER_FFT_MIN_BINS;
-  while (fft_bins < PANADAPTER_FFT_MAX_BINS) {
-    const double bin_hz = output_rate / fft_bins;
-    const int half_bins = (int)floor(config->display_span_hz / (2.0 * bin_hz));
-    if (2 * half_bins + 1 >= target_bins)
-      break;
-    fft_bins *= 2;
-  }
-  if (!ensure_fft_plan(state, fft_bins))
+  struct analysis_layout layout;
+  if (!prepare_analysis(state, config, &layout))
     return frames;
 
-  const int observed = observation_samples(config, decimation, fft_bins);
-  const int raw_count = (observed - 1) * decimation + FILTER_TAPS;
   const uint64_t current = atomic_load_explicit(&state->samples_written,
     memory_order_acquire);
   uint64_t first_sample = UINT64_MAX;
   uint64_t last_sample = 0;
   for (int row = 0; row < count; row++) {
     const uint64_t end = sample_ends[row];
-    if (end > current || end < (uint64_t)raw_count ||
-        current - end + raw_count + PANADAPTER_FFT_MAX_BINS > HISTORY_RING_SIZE)
+    if (end > current || end < (uint64_t)layout.raw_count ||
+        current - end + layout.raw_count + PANADAPTER_FFT_MAX_BINS >
+          HISTORY_RING_SIZE)
       continue;
-    const uint64_t start = end - raw_count;
+    const uint64_t start = end - layout.raw_count;
     if (start < first_sample) first_sample = start;
     if (end > last_sample) last_sample = end;
   }
@@ -368,16 +388,12 @@ static struct panadapter_fft_frame *analyze_history_batch(
     return frames;
 
   const size_t input_count = (size_t)(last_sample - first_sample);
-  fftwf_complex *input = fftwf_alloc_complex(input_count);
   const size_t filtered_count = input_count - FILTER_TAPS + 1;
+  fftwf_complex *input = fftwf_alloc_complex(input_count);
   fftwf_complex *filtered = fftwf_alloc_complex(filtered_count);
   unsigned char *computed = calloc(filtered_count, 1);
-  if (!input || !filtered || !computed) {
-    if (input) fftwf_free(input);
-    if (filtered) fftwf_free(filtered);
-    free(computed);
-    return frames;
-  }
+  if (!input || !filtered || !computed)
+    goto cleanup;
 
   const size_t ring_index = (size_t)(first_sample & HISTORY_RING_INDEX_MASK);
   size_t first_count = HISTORY_RING_SIZE - ring_index;
@@ -386,46 +402,26 @@ static struct panadapter_fft_frame *analyze_history_batch(
   memcpy(input + first_count, state->sample_ring,
     (input_count - first_count) * sizeof(*input));
   if (atomic_load_explicit(&state->samples_written, memory_order_acquire) -
-      first_sample > HISTORY_RING_SIZE) {
-    fftwf_free(input);
-    fftwf_free(filtered);
-    free(computed);
-    return frames;
-  }
+      first_sample > HISTORY_RING_SIZE)
+    goto cleanup;
 
   shift_buffer(input, (int)input_count, config->center_hz, first_sample);
   if (atomic_load_explicit(&state->history_epoch, memory_order_relaxed) !=
-      history_epoch) {
-    fftwf_free(input);
-    fftwf_free(filtered);
-    free(computed);
-    return frames;
-  }
-  if (bandwidth != state->filter_bandwidth_hz) {
-    make_filter(state, bandwidth);
-    state->filter_bandwidth_hz = bandwidth;
-  }
-
-  const float length_scale = sqrtf((float)(FFT_LEVEL_REFERENCE_BINS * decimation) /
-    (float)observed);
-  const double bin_hz = output_rate / fft_bins;
-  int half_bins = (int)floor(config->display_span_hz / (2.0 * bin_hz));
-  const int max_half_bins = fft_bins > 1 ? fft_bins / 2 - 1 : 0;
-  if (half_bins > max_half_bins) half_bins = max_half_bins;
-  const int visible_bins = 2 * half_bins + 1;
+      history_epoch)
+    goto cleanup;
 
   for (int row = 0; row < count; row++) {
     if (atomic_load_explicit(&state->history_epoch, memory_order_relaxed) !=
         history_epoch)
       break;
     const uint64_t end = sample_ends[row];
-    if (end > last_sample || end < (uint64_t)raw_count ||
-        end - raw_count < first_sample)
+    if (end > last_sample || end < (uint64_t)layout.raw_count ||
+        end - layout.raw_count < first_sample)
       continue;
-    memset(state->fft_data, 0, sizeof(*state->fft_data) * fft_bins);
-    for (int output = 0; output < observed; output++) {
+    memset(state->fft_data, 0, sizeof(*state->fft_data) * layout.fft_bins);
+    for (int output = 0; output < layout.observed; output++) {
       const uint64_t newest = end - 1 -
-        (uint64_t)(observed - 1 - output) * decimation;
+        (uint64_t)(layout.observed - 1 - output) * layout.decimation;
       const size_t filtered_index = (size_t)(newest -
         (first_sample + FILTER_TAPS - 1));
       if (!computed[filtered_index]) {
@@ -436,38 +432,16 @@ static struct panadapter_fft_frame *analyze_history_batch(
         filtered[filtered_index] = sum;
         computed[filtered_index] = 1;
       }
-      const float window = observed == 1 ? 1.0f :
-        0.5f - 0.5f * cosf(2.0f * (float)M_PI * output / (observed - 1));
-      state->fft_data[output] = filtered[filtered_index] * window * length_scale;
+      state->fft_data[output] = filtered[filtered_index] *
+        hann_window(output, layout.observed) * layout.length_scale;
     }
     fftwf_execute(state->fft_plan);
-
-    struct panadapter_fft_frame *frame = &frames[row];
-    frame->count = visible_bins < target_bins ? visible_bins : target_bins;
-    frame->first_hz = config->center_hz + half_bins * bin_hz;
-    frame->bin_step_hz = frame->count > 1
-      ? -(visible_bins - 1) * bin_hz / (frame->count - 1) : -bin_hz;
-    frame->decimation = decimation;
-    frame->observation_samples = observed;
-    frame->fft_bins = fft_bins;
-    frame->sample_end = end;
-    frame->config = *config;
-    for (int output = 0; output < frame->count; output++) {
-      const int first_visible = output * visible_bins / frame->count;
-      const int end_visible = (output + 1) * visible_bins / frame->count;
-      float magnitude = 0.0f;
-      for (int visible = first_visible; visible < end_visible; visible++) {
-        const int signed_bin = half_bins - visible;
-        const int fft_bin = signed_bin >= 0 ? signed_bin : fft_bins + signed_bin;
-        magnitude = fmaxf(magnitude, cabsf(state->fft_data[fft_bin]));
-      }
-      frame->bins[output] = (int)lroundf(20.0f *
-        log10f(fmaxf(magnitude, 1.0e-12f)));
-    }
+    fill_frame(state, config, &layout, false, end, 0, &frames[row]);
   }
 
-  fftwf_free(input);
-  fftwf_free(filtered);
+cleanup:
+  if (input) fftwf_free(input);
+  if (filtered) fftwf_free(filtered);
   free(computed);
   return frames;
 }

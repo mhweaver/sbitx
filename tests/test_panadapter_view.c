@@ -48,6 +48,9 @@ int main(void) {
   assert(panadapter_grid_first_hz(-1200, 500) == -1000);
   assert(panadapter_grid_label_hz(14074750, 3000, 250) == 14074800);
   assert(panadapter_grid_label_hz(14074750, 25000, 2500) == 14075000);
+  assert(panadapter_view_frequency_x(10, 400, 14074800, 14073000, 3000) == 250);
+  assert(panadapter_view_frequency_x(10, 400, 14070000, 14073000, 3000) == 10);
+  assert(panadapter_view_frequency_x(10, 400, 14080000, 14073000, 3000) == 410);
 
   puts("panadapter view tests passed");
   return 0;

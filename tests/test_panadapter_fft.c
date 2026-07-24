@@ -218,14 +218,6 @@ int main(void)
 	assert_tone(context, 4500.0, 10000, 0, &config, &generation);
 	assert_tone(context, 10000.0, 24980, 0, &config, &generation);
 
-	config.is_tx = 1;
-	push_signal(context, TEST_RING_SIZE, 700.0, 0.25);
-	const struct panadapter_fft_frame tx =
-		wait_for_frame(context, &config, generation);
-	generation = tx.generation;
-	assert(tx.config.is_tx == 1);
-	config.is_tx = 0;
-
 	config.display_span_hz = 2500;
 	config.center_hz = 0;
 	config.is_cw = 1;

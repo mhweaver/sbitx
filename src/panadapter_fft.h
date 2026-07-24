@@ -14,7 +14,6 @@ struct panadapter_fft_config {
   int display_span_hz;
   int center_hz;
   int is_cw;
-  int is_tx;
   int wpm;
   int refresh_ms;
   int display_width_px;

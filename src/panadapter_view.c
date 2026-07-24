@@ -17,6 +17,7 @@ void panadapter_view_reset(struct panadapter_view *view) {
 }
 
 bool panadapter_view_is_default(const struct panadapter_view *view) {
+  // Pan and zoom use floating point, so treat values very close to reset as default.
   return fabs(view->zoom - 1.0) < 1.0e-6 && fabs(view->center) < 1.0e-6;
 }
 
@@ -50,6 +51,8 @@ void panadapter_view_fit(struct panadapter_view *view, double start, double stop
   clamp_view(view);
 }
 
+// Find where a point in the new view came from in the old view. This lets the
+// existing waterfall image be resampled immediately while new history renders.
 double panadapter_view_map_position(const struct panadapter_view *old_view,
                                     const struct panadapter_view *new_view,
                                     double new_position) {
@@ -57,6 +60,9 @@ double panadapter_view_map_position(const struct panadapter_view *old_view,
   return 0.5 + (frequency - old_view->center) * old_view->zoom;
 }
 
+// Choose a readable 1/2/2.5/5/10 Hz-decade interval near 8-10 grid divisions.
+// If that would produce more than 12 ticks, promote the interval so adjacent
+// labels do not get too close together to distinguish and read easily.
 int panadapter_grid_step_hz(int span_hz) {
   if (span_hz < 1)
     return 1;
@@ -75,6 +81,7 @@ int panadapter_grid_step_hz(int span_hz) {
   return step;
 }
 
+// Return the first absolute step boundary at or above the view's left edge.
 int64_t panadapter_grid_first_hz(int64_t view_start_hz, int step_hz) {
   if (step_hz < 1)
     return view_start_hz;
@@ -84,10 +91,20 @@ int64_t panadapter_grid_first_hz(int64_t view_start_hz, int step_hz) {
   return remainder ? view_start_hz + step_hz - remainder : view_start_hz;
 }
 
+// Snap a tick to the exact frequency shown by its rounded label so the grid
+// line cannot drift away from that label or a matching pitch marker.
 int64_t panadapter_grid_label_hz(int64_t frequency_hz, int span_hz, int step_hz) {
   const int resolution = span_hz >= 10000
     ? 1000
     : step_hz >= 100 ? 100
     : step_hz >= 10 ? 10 : 1;
   return (int64_t)llround((double)frequency_hz / resolution) * resolution;
+}
+
+int panadapter_view_frequency_x(int x, int width, int64_t frequency,
+                                int64_t view_start, int span_hz) {
+  int64_t offset = frequency - view_start;
+  if (offset < 0) offset = 0;
+  if (offset > span_hz) offset = span_hz;
+  return x + (int)(offset * width / span_hz);
 }

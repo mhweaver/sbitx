@@ -63,6 +63,7 @@ The initial sync between the gui values, the core radio values, settings, et al 
 #include "cessb.h"
 #include "freq_keypad.h"
 #include "panadapter_fft.h"
+#include "panadapter_renderer.h"
 #include "panadapter_view.h"
 extern int get_rx_gain(void);
 extern int calculate_s_meter(struct rx *r, double rx_gain);
@@ -322,28 +323,6 @@ struct encoder
 };
 void tuning_isr(void);
 
-#define COLOR_SELECTED_TEXT 0
-#define COLOR_TEXT 1
-#define COLOR_TEXT_MUTED 2
-#define COLOR_SELECTED_BOX 3
-#define COLOR_BACKGROUND 4
-#define COLOR_FREQ 5
-#define COLOR_LABEL 6
-#define SPECTRUM_BACKGROUND 7
-#define SPECTRUM_GRID 8
-#define SPECTRUM_PLOT 9
-#define SPECTRUM_NEEDLE 10
-#define COLOR_CONTROL_BOX 11
-#define SPECTRUM_BANDWIDTH 12
-#define COLOR_RX_PITCH 13
-#define SELECTED_LINE 14
-#define COLOR_FIELD_SELECTED 15
-#define COLOR_TX_PITCH 16
-#define COLOR_TOGGLE_ACTIVE 17
-#define WATERFALL_LOW  18
-#define WATERFALL_MID  19
-#define WATERFALL_HIGH 20
-
 float palette[][3] = {
 	{1, 1, 1},		 // COLOR_SELECTED_TEXT
 	{0, 1, 1},		 // COLOR_TEXT
@@ -386,15 +365,6 @@ static int ui_scale_applied = 0;
 
 // we just use a look-up table to define the fonts used
 // the struct field indexes into this table
-struct font_style {
-	int index;
-	float r, g, b;
-	char name[32];
-	int height;
-	int weight;
-	int type;
-};
-
 guint key_modifier = 0;
 
 // A mapping from named style to font and color (for now that's all it is)
@@ -2426,22 +2396,6 @@ static long spectrum_view_start(long tuned_freq)
 		+ panadapter_view_center_hz(&panadapter_view, PANADAPTER_FULL_SPAN_HZ);
 }
 
-// Map a frequency to a clamped pixel edge shared by all spectrum overlays.
-static int spectrum_frequency_x(const struct field *f, int64_t frequency,
-								int64_t view_start, int span_hz)
-{
-	int64_t offset = frequency - view_start;
-	if (offset < 0) offset = 0;
-	if (offset > span_hz) offset = span_hz;
-	return f->x + (int)(offset * f->width / span_hz);
-}
-
-static int spectrum_tuned_x(const struct field *f, long tuned_freq,
-							long view_start, int span_hz)
-{
-	return spectrum_frequency_x(f, tuned_freq, view_start, span_hz);
-}
-
 static void spectrum_filter_range(long tuned_freq, long *start, long *stop)
 {
 	const int high = atoi(get_field("r1:high")->value);
@@ -2468,18 +2422,6 @@ static long spectrum_display_frequency(void)
 	return frequency;
 }
 
-struct spectrum_display_frame {
-	int bins[MAX_BINS];
-	int count;
-	double first_hz;
-	double bin_step_hz;
-	int latency_ms;
-	int span_hz;
-	int center_hz;
-	int mode;
-	uint64_t sample_end;
-};
-
 static int spectrum_refresh_interval_ms(int mode)
 {
 	const int interval = mode == MODE_FT4 || mode == MODE_FT8
@@ -2498,46 +2440,23 @@ static struct panadapter_fft_config spectrum_fft_config(void)
 		.display_span_hz = span_hz,
 		.center_hz = center_hz,
 		.is_cw = mode == MODE_CW || mode == MODE_CWR,
-		.is_tx = in_tx,
 		.wpm = MAX(1, get_wpm()),
 		.refresh_ms = spectrum_refresh_interval_ms(mode),
 		.display_width_px = MAX(1, spectrum->width),
 	};
 }
 
-static void spectrum_display_frame_get(struct spectrum_display_frame *frame)
+static void panadapter_frame_get(struct panadapter_fft *context,
+	const struct panadapter_fft_config *config,
+	struct panadapter_fft_frame *frame)
 {
-	const struct panadapter_fft_config config = spectrum_fft_config();
-	const int span_hz = config.display_span_hz;
-	const int center_hz = config.center_hz;
-	const int mode = mode_id(get_field("r1:mode")->value);
-	struct panadapter_fft_frame panadapter;
-	panadapter_fft_request(panadapter_fft_context, &config);
-	if (panadapter_fft_get_frame(panadapter_fft_context, &config, &panadapter)) {
-		frame->count = MIN(MAX_BINS, panadapter.count);
-		memcpy(frame->bins, panadapter.bins,
-			frame->count * sizeof(frame->bins[0]));
-		frame->first_hz = panadapter.first_hz;
-		frame->bin_step_hz = panadapter.bin_step_hz;
-		frame->latency_ms = panadapter_fft_frame_latency_ms(&panadapter);
-		frame->span_hz = span_hz;
-		frame->center_hz = center_hz;
-		frame->mode = mode;
-		frame->sample_end = panadapter.sample_end;
-		return;
-	}
-
-	*frame = (struct spectrum_display_frame) {
-		.bins = {-120},
-		.count = 1,
-		.first_hz = center_hz,
-		.bin_step_hz = -span_hz,
-		.latency_ms = -1,
-		.span_hz = span_hz,
-		.center_hz = center_hz,
-		.mode = mode,
-		.sample_end = 0,
-	};
+	panadapter_fft_request(context, config);
+	if (!panadapter_fft_get_frame(context, config, frame))
+		*frame = (struct panadapter_fft_frame) {
+			.bins = {-120},
+			.count = 1,
+			.config = *config,
+		};
 }
 
 void save_user_settings(int forced)
@@ -3468,11 +3387,8 @@ struct waterfall_history_row {
 };
 
 static struct waterfall_history_row *waterfall_history_rows;
-static int waterfall_history_row_count;
 static int waterfall_storage_width;
 static int waterfall_storage_height;
-static int waterfall_display_width;
-static int waterfall_display_height;
 static uint64_t waterfall_drawn_sample_end;
 static uint64_t waterfall_view_generation = 1;
 static uint64_t waterfall_history_map_generation;
@@ -3481,7 +3397,6 @@ static struct panadapter_fft_config waterfall_history_config;
 static struct {
 	bool active;
 	uint64_t token;
-	uint64_t sample_end;
 	uint64_t view_generation;
 } waterfall_history_request;
 static struct {
@@ -3493,16 +3408,7 @@ static struct {
 
 static void waterfall_history_start(void);
 static void waterfall_history_schedule(void);
-
-enum panadapter_control {
-	PANADAPTER_ZOOM_OUT,
-	PANADAPTER_ZOOM_IN,
-	PANADAPTER_LEFT,
-	PANADAPTER_RIGHT,
-	PANADAPTER_FILTER,
-	PANADAPTER_FULL,
-	PANADAPTER_CONTROL_COUNT,
-};
+static void waterfall_history_snapshot(void);
 
 static __attribute__((optimize("O3"))) void remap_waterfall(
 							const struct panadapter_view *old_view,
@@ -3617,118 +3523,18 @@ static struct panadapter_view panadapter_filter_view(void)
 static void panadapter_control_rect(const struct field *f, int control,
 									int *x, int *y, int *size)
 {
-	*size = MIN(SC(34), f->height - SC(10));
-	*x = f->x + SC(5) + control * (*size + SC(4));
-	*y = f->y + f->height - *size - SC(5);
-}
-
-static void draw_panadapter_control(struct field *f, cairo_t *gfx, int control)
-{
-	int x, y, size;
-	panadapter_control_rect(f, control, &x, &y, &size);
-	const double cx = x + size / 2.0;
-	const double cy = y + size / 2.0;
-
-	cairo_save(gfx);
-	cairo_set_source_rgba(gfx, palette[COLOR_BACKGROUND][0],
-		palette[COLOR_BACKGROUND][1], palette[COLOR_BACKGROUND][2], 0.82);
-	cairo_rectangle(gfx, x, y, size, size);
-	cairo_fill_preserve(gfx);
-	const bool enabled = panadapter_control_enabled(control);
-	cairo_set_source_rgb(gfx, palette[COLOR_CONTROL_BOX][0],
-		palette[COLOR_CONTROL_BOX][1], palette[COLOR_CONTROL_BOX][2]);
-	cairo_set_line_width(gfx, MAX(1.5, size / 16.0));
-	cairo_set_line_cap(gfx, CAIRO_LINE_CAP_ROUND);
-	cairo_set_line_join(gfx, CAIRO_LINE_JOIN_ROUND);
-	cairo_stroke(gfx);
-	if (enabled) {
-		const struct font_style *style = &font_table[STYLE_SMALL_FIELD_VALUE];
-		cairo_set_source_rgb(gfx, style->r, style->g, style->b);
-	} else {
-		cairo_set_source_rgb(gfx, palette[COLOR_TEXT_MUTED][0],
-			palette[COLOR_TEXT_MUTED][1], palette[COLOR_TEXT_MUTED][2]);
-	}
-
-	if (control == PANADAPTER_LEFT || control == PANADAPTER_RIGHT) {
-		const double direction = control == PANADAPTER_LEFT ? -1.0 : 1.0;
-		const double tip = cx + direction * size * 0.27;
-		const double base = cx + direction * size * 0.02;
-		cairo_move_to(gfx, cx - direction * size * 0.25, cy);
-		cairo_line_to(gfx, tip, cy);
-		cairo_stroke(gfx);
-		cairo_move_to(gfx, tip, cy);
-		cairo_line_to(gfx, base, cy - size * 0.22);
-		cairo_line_to(gfx, base, cy + size * 0.22);
-		cairo_close_path(gfx);
-		cairo_fill(gfx);
-	} else if (control == PANADAPTER_ZOOM_OUT || control == PANADAPTER_ZOOM_IN) {
-		const double radius = size * 0.20;
-		cairo_arc(gfx, cx - size * 0.07, cy - size * 0.07, radius, 0, 2 * M_PI);
-		cairo_move_to(gfx, cx + size * 0.08, cy + size * 0.08);
-		cairo_line_to(gfx, cx + size * 0.27, cy + size * 0.27);
-		cairo_move_to(gfx, cx - size * 0.18, cy - size * 0.07);
-		cairo_line_to(gfx, cx + size * 0.04, cy - size * 0.07);
-		if (control == PANADAPTER_ZOOM_IN) {
-			cairo_move_to(gfx, cx - size * 0.07, cy - size * 0.18);
-			cairo_line_to(gfx, cx - size * 0.07, cy + size * 0.04);
-		}
-		cairo_stroke(gfx);
-	} else if (control == PANADAPTER_FILTER) {
-		cairo_move_to(gfx, cx - size * 0.30, cy + size * 0.23);
-		cairo_curve_to(gfx, cx - size * 0.20, cy + size * 0.23,
-			cx - size * 0.19, cy - size * 0.22, cx - size * 0.08, cy - size * 0.22);
-		cairo_line_to(gfx, cx + size * 0.08, cy - size * 0.22);
-		cairo_curve_to(gfx, cx + size * 0.19, cy - size * 0.22,
-			cx + size * 0.20, cy + size * 0.23, cx + size * 0.30, cy + size * 0.23);
-		cairo_stroke(gfx);
-	} else {
-		const double inner = size * 0.04;
-		const double outer = size * 0.26;
-		for (int sx = -1; sx <= 1; sx += 2) {
-			for (int sy = -1; sy <= 1; sy += 2) {
-				cairo_move_to(gfx, cx + sx * inner, cy + sy * outer);
-				cairo_line_to(gfx, cx + sx * outer, cy + sy * outer);
-				cairo_line_to(gfx, cx + sx * outer, cy + sy * inner);
-			}
-		}
-		cairo_stroke(gfx);
-	}
-	cairo_restore(gfx);
+	panadapter_renderer_control_rect(f->x, f->y, f->height, control,
+									 x, y, size);
 }
 
 static void draw_panadapter_controls(struct field *f, cairo_t *gfx)
 {
+	unsigned enabled = 0;
 	for (int control = 0; control < PANADAPTER_CONTROL_COUNT; control++)
-		draw_panadapter_control(f, gfx, control);
-
-	int x, y, size;
-	panadapter_control_rect(f, PANADAPTER_CONTROL_COUNT - 1, &x, &y, &size);
-	char bandwidth[24];
-	const int span_hz = spectrum_display_span_hz();
-	if (span_hz >= 1000 && span_hz % 1000 == 0)
-		snprintf(bandwidth, sizeof(bandwidth), "%d kHz", span_hz / 1000);
-	else if (span_hz >= 1000)
-		snprintf(bandwidth, sizeof(bandwidth), "%.1f kHz", span_hz / 1000.0);
-	else
-		snprintf(bandwidth, sizeof(bandwidth), "%d Hz", span_hz);
-
-	cairo_save(gfx);
-	const struct font_style *style = &font_table[STYLE_SMALL_FIELD_VALUE];
-	cairo_select_font_face(gfx, style->name, style->type, style->weight);
-	cairo_set_font_size(gfx, style->height);
-	cairo_text_extents_t extents;
-	cairo_text_extents(gfx, bandwidth, &extents);
-	const double text_x = x + size + SC(7);
-	const double text_y = y + (size - extents.height) / 2.0 - extents.y_bearing;
-	cairo_set_source_rgba(gfx, palette[COLOR_BACKGROUND][0],
-		palette[COLOR_BACKGROUND][1], palette[COLOR_BACKGROUND][2], 0.82);
-	cairo_rectangle(gfx, text_x - SC(4), text_y + extents.y_bearing - SC(3),
-		extents.width + SC(8), extents.height + SC(6));
-	cairo_fill(gfx);
-	cairo_set_source_rgb(gfx, style->r, style->g, style->b);
-	cairo_move_to(gfx, text_x, text_y);
-	cairo_show_text(gfx, bandwidth);
-	cairo_restore(gfx);
+		if (panadapter_control_enabled(control))
+			enabled |= 1u << control;
+	panadapter_renderer_draw_controls(gfx, f->x, f->y, f->height,
+		spectrum_display_span_hz(), enabled);
 }
 
 static int panadapter_control_at(struct field *f, int pointer_x, int pointer_y)
@@ -3807,9 +3613,10 @@ static bool resize_waterfall(struct field *f)
 				}
 			}
 		}
-		if (waterfall_history_rows)
-			memcpy(new_rows, waterfall_history_rows,
-				(size_t)MIN(waterfall_history_row_count, new_height) * sizeof(*new_rows));
+			if (waterfall_history_rows)
+				memcpy(new_rows, waterfall_history_rows,
+					(size_t)MIN(waterfall_storage_height, new_height) *
+						sizeof(*new_rows));
 		memcpy(new_history_map, new_map, (size_t)f->width * new_height * 3);
 
 		if (waterfall_pixbuf) {
@@ -3825,7 +3632,6 @@ static bool resize_waterfall(struct field *f)
 		waterfall_history_rows = new_rows;
 		waterfall_storage_width = f->width;
 		waterfall_storage_height = new_height;
-		waterfall_history_row_count = new_height;
 
 		if (width_changed && rows > 0) {
 			waterfall_view_generation++;
@@ -3836,15 +3642,14 @@ static bool resize_waterfall(struct field *f)
 		}
 	}
 
-	if (!waterfall_pixbuf || waterfall_display_width != f->width ||
-		waterfall_display_height != f->height) {
+	if (!waterfall_pixbuf ||
+		gdk_pixbuf_get_width(waterfall_pixbuf) != f->width ||
+		gdk_pixbuf_get_height(waterfall_pixbuf) != f->height) {
 		if (waterfall_pixbuf)
 			g_object_unref(waterfall_pixbuf);
 		waterfall_pixbuf = gdk_pixbuf_new_from_data(waterfall_map,
 			GDK_COLORSPACE_RGB, FALSE, 8, f->width, f->height,
 			waterfall_storage_width * 3, NULL, NULL);
-		waterfall_display_width = f->width;
-		waterfall_display_height = f->height;
 		waterfall_history_start();
 	}
 	return waterfall_pixbuf != NULL;
@@ -3911,39 +3716,6 @@ void init_waterfall()
 	}
 }
 
-static void waterfall_color_pixel(float value, float min_db, float max_db,
-								  float offset, guint8 *pixel)
-{
-	float normalized;
-	if (!strcmp(field_str("AUTOSCOPE"), "ON") && !in_tx)
-		normalized = (value * 2.4f - offset) / (max_db - offset) * 100.0f;
-	else
-		normalized = (value * 2.4f - min_db) / (max_db - min_db) * 100.0f;
-	normalized = MAX(0.0f, MIN(100.0f, normalized));
-
-	const int v = (int)normalized;
-	float wr, wg, wb;
-	if (v < 34) {
-		const float t = v / 33.0f;
-		wr = palette[WATERFALL_LOW][0] * t;
-		wg = palette[WATERFALL_LOW][1] * t;
-		wb = palette[WATERFALL_LOW][2] * t;
-	} else if (v < 67) {
-		const float t = (v - 33) / 34.0f;
-		wr = palette[WATERFALL_LOW][0] + (palette[WATERFALL_MID][0] - palette[WATERFALL_LOW][0]) * t;
-		wg = palette[WATERFALL_LOW][1] + (palette[WATERFALL_MID][1] - palette[WATERFALL_LOW][1]) * t;
-		wb = palette[WATERFALL_LOW][2] + (palette[WATERFALL_MID][2] - palette[WATERFALL_LOW][2]) * t;
-	} else {
-		const float t = (v - 67) / 33.0f;
-		wr = palette[WATERFALL_MID][0] + (palette[WATERFALL_HIGH][0] - palette[WATERFALL_MID][0]) * t;
-		wg = palette[WATERFALL_MID][1] + (palette[WATERFALL_HIGH][1] - palette[WATERFALL_MID][1]) * t;
-		wb = palette[WATERFALL_MID][2] + (palette[WATERFALL_HIGH][2] - palette[WATERFALL_MID][2]) * t;
-	}
-	pixel[0] = (guint8)(wr * 255);
-	pixel[1] = (guint8)(wg * 255);
-	pixel[2] = (guint8)(wb * 255);
-}
-
 static void waterfall_render_history_row(struct field *f, int row,
 									 const struct panadapter_fft_frame *frame,
 									 float min_db, float max_db, float offset)
@@ -3955,12 +3727,14 @@ static void waterfall_render_history_row(struct field *f, int row,
 		return;
 	guint8 *target = waterfall_history_map_generation == waterfall_view_generation
 		? waterfall_history_map : waterfall_map;
+	const bool auto_scope = !strcmp(field_str("AUTOSCOPE"), "ON") && !in_tx;
 	for (int x = 0; x < f->width; x++) {
 		const int bin = (f->width - 1 - x) * frame->count / f->width;
 		int y = ((frame->bins[bin] + waterfall_offset) * spectrum->height) / 80;
 		y = MAX(0, MIN(spectrum->height - 1, y));
-		waterfall_color_pixel((y * 100) / grid_height, min_db, max_db,
-			offset, target + ((size_t)row * f->width + x) * 3);
+		panadapter_renderer_waterfall_pixel((y * 100) / grid_height,
+			min_db, max_db, offset, auto_scope,
+			target + ((size_t)row * f->width + x) * 3);
 	}
 }
 
@@ -3973,7 +3747,7 @@ static void waterfall_history_render_clear(void)
 static bool waterfall_history_update(struct field *f, float min_db,
 									  float max_db, float offset)
 {
-	if (!waterfall_history_rows || waterfall_history_row_count < f->height)
+	if (!waterfall_history_rows || waterfall_storage_height < f->height)
 		return false;
 
 	if (waterfall_history_request.active) {
@@ -4064,12 +3838,7 @@ static bool waterfall_history_update(struct field *f, float min_db,
 static gboolean waterfall_history_tick(gpointer unused)
 {
 	(void)unused;
-	if (!waterfall_dragging && waterfall_history_map &&
-		waterfall_history_map_generation != waterfall_view_generation) {
-		memcpy(waterfall_history_map, waterfall_map,
-			(size_t)waterfall_storage_width * waterfall_storage_height * 3);
-		waterfall_history_map_generation = waterfall_view_generation;
-	}
+	waterfall_history_snapshot();
 	struct field *f = get_field("waterfall");
 	const bool pending = waterfall_history_update(f,
 		(wf_min - 1.0f) * 100.0f, 100.0f * wf_max,
@@ -4086,12 +3855,7 @@ static void waterfall_history_start(void)
 		g_source_remove(waterfall_history_debounce_timer);
 		waterfall_history_debounce_timer = 0;
 	}
-	if (!waterfall_dragging && waterfall_history_map &&
-		waterfall_history_map_generation != waterfall_view_generation) {
-		memcpy(waterfall_history_map, waterfall_map,
-			(size_t)waterfall_storage_width * waterfall_storage_height * 3);
-		waterfall_history_map_generation = waterfall_view_generation;
-	}
+	waterfall_history_snapshot();
 	if (!waterfall_history_timer)
 		waterfall_history_timer = g_timeout_add(1, waterfall_history_tick, NULL);
 }
@@ -4104,6 +3868,16 @@ static gboolean waterfall_history_debounce_tick(gpointer unused)
 	waterfall_history_debounce_timer = 0;
 	waterfall_history_start();
 	return G_SOURCE_REMOVE;
+}
+
+static void waterfall_history_snapshot(void)
+{
+	if (!waterfall_dragging && waterfall_history_map &&
+		waterfall_history_map_generation != waterfall_view_generation) {
+		memcpy(waterfall_history_map, waterfall_map,
+			(size_t)waterfall_storage_width * waterfall_storage_height * 3);
+		waterfall_history_map_generation = waterfall_view_generation;
+	}
 }
 
 static void waterfall_history_schedule(void)
@@ -4233,7 +4007,8 @@ void draw_waterfall(struct field *f, cairo_t *gfx)
 				waterfall_history_map,
 				(size_t)waterfall_storage_width * (waterfall_storage_height - 1) * 3);
 		memmove(waterfall_history_rows + 1, waterfall_history_rows,
-			(size_t)(waterfall_history_row_count - 1) * sizeof(*waterfall_history_rows));
+			(size_t)(waterfall_storage_height - 1) *
+				sizeof(*waterfall_history_rows));
 		waterfall_history_rows[0] = (struct waterfall_history_row) {
 			.sample_end = waterfall_live_sample_end,
 			.view_generation = waterfall_view_generation,
@@ -4241,11 +4016,14 @@ void draw_waterfall(struct field *f, cairo_t *gfx)
 
 		if (strcmp(field_str("AUTOSCOPE"), "ON") || in_tx)
 			waterfall_color_offset = 0;
+		const bool auto_scope = !strcmp(field_str("AUTOSCOPE"), "ON") && !in_tx;
 		for (int i = 0; i < f->width; i++) {
-			waterfall_color_pixel(wf[i], min_db, max_db, waterfall_color_offset,
+			panadapter_renderer_waterfall_pixel(wf[i], min_db, max_db,
+				waterfall_color_offset, auto_scope,
 				waterfall_map + i * 3);
 			if (waterfall_history_map_generation == waterfall_view_generation)
-				waterfall_color_pixel(wf[i], min_db, max_db, waterfall_color_offset,
+				panadapter_renderer_waterfall_pixel(wf[i], min_db, max_db,
+					waterfall_color_offset, auto_scope,
 					waterfall_history_map + i * 3);
 		}
 
@@ -4282,54 +4060,14 @@ void draw_waterfall(struct field *f, cairo_t *gfx)
 	draw_panadapter_controls(f, gfx);
 }
 
-void draw_spectrum_grid(struct field *f_spectrum, cairo_t *gfx,
-						long view_start, int span_hz)
-{
-	struct field *f = f_spectrum;
-	int grid_height = f->height - (font_table[STYLE_SMALL].height * 4 / 3);
-
-	cairo_set_line_width(gfx, 1);
-	cairo_set_source_rgb(gfx, palette[SPECTRUM_GRID][0],
-						 palette[SPECTRUM_GRID][1], palette[SPECTRUM_GRID][2]);
-
-	cairo_set_line_width(gfx, 1);
-	cairo_set_source_rgb(gfx, palette[SPECTRUM_GRID][0],
-						 palette[SPECTRUM_GRID][1], palette[SPECTRUM_GRID][2]);
-
-	// draw the horizontal grid
-	for (int division = 0; division <= 10; division++)
-	{
-		int grid_y = f->y + (grid_height * division) / 10;
-		cairo_move_to(gfx, f->x, grid_y);
-		cairo_line_to(gfx, f->x + f->width, grid_y);
-	}
-
-	// Anchor vertical lines to absolute frequencies so scrolling moves the grid.
-	cairo_move_to(gfx, f->x, f->y);
-	cairo_line_to(gfx, f->x, f->y + grid_height);
-	cairo_move_to(gfx, f->x + f->width, f->y);
-	cairo_line_to(gfx, f->x + f->width, f->y + grid_height);
-	const int grid_step = panadapter_grid_step_hz(span_hz);
-	const int64_t view_stop = (int64_t)view_start + span_hz;
-	for (int64_t nominal = panadapter_grid_first_hz(view_start - grid_step, grid_step);
-		 nominal <= view_stop + grid_step; nominal += grid_step) {
-		const int64_t frequency = panadapter_grid_label_hz(nominal, span_hz, grid_step);
-		if (frequency <= view_start || frequency >= view_stop)
-			continue;
-		const int grid_x = spectrum_frequency_x(f, frequency, view_start, span_hz);
-		cairo_move_to(gfx, grid_x, f->y);
-		cairo_line_to(gfx, grid_x, f->y + grid_height);
-	}
-	cairo_stroke(gfx);
-}
-
 // Clear averaging whenever the selected bin layout changes.
-static void prepare_spectrum_history(const struct spectrum_display_frame *frame)
+static void prepare_spectrum_history(const struct panadapter_fft_frame *frame,
+									 int mode)
 {
 	bool changed = !spectrum_history.valid ||
-		spectrum_history.span_hz != frame->span_hz ||
-		spectrum_history.center_hz != frame->center_hz ||
-		spectrum_history.mode != frame->mode ||
+		spectrum_history.span_hz != frame->config.display_span_hz ||
+		spectrum_history.center_hz != frame->config.center_hz ||
+		spectrum_history.mode != mode ||
 		spectrum_history.count != frame->count || spectrum_history.in_tx != in_tx;
 	if (!changed)
 		return;
@@ -4337,14 +4075,14 @@ static void prepare_spectrum_history(const struct spectrum_display_frame *frame)
 	memset(spectrum_history.frames, 0, sizeof(spectrum_history.frames));
 	spectrum_history.current_frame_index = 0;
 	spectrum_history.valid = true;
-	spectrum_history.span_hz = frame->span_hz;
-	spectrum_history.center_hz = frame->center_hz;
-	spectrum_history.mode = frame->mode;
+	spectrum_history.span_hz = frame->config.display_span_hz;
+	spectrum_history.center_hz = frame->config.center_hz;
+	spectrum_history.mode = mode;
 	spectrum_history.count = frame->count;
 	spectrum_history.in_tx = in_tx;
 }
 
-static void update_spectrum_history(const struct spectrum_display_frame *frame)
+static void update_spectrum_history(const struct panadapter_fft_frame *frame)
 {
 	memcpy(spectrum_history.frames[spectrum_history.current_frame_index], frame->bins,
 		   frame->count * sizeof(frame->bins[0]));
@@ -4354,7 +4092,7 @@ static void update_spectrum_history(const struct spectrum_display_frame *frame)
 }
 
 static void compute_time_based_average(int *averaged_spectrum,
-								   const struct spectrum_display_frame *display)
+								   const struct panadapter_fft_frame *display)
 {
 	int n_bins = display->count;
 	memset(averaged_spectrum, 0, n_bins * sizeof(int));
@@ -4405,8 +4143,10 @@ static void draw_oob_band_strip(struct field *f, cairo_t *gfx,
 		// Clamp to visible area and convert to pixel coords
 		long  clamp_start = r->start > vis_start ? r->start : vis_start;
 		long  clamp_stop  = r->stop  < vis_stop  ? r->stop  : vis_stop;
-		int   px_start = spectrum_frequency_x(f, clamp_start, vis_start, span_hz);
-		int   px_stop  = spectrum_frequency_x(f, clamp_stop, vis_start, span_hz);
+		int px_start = panadapter_view_frequency_x(f->x, f->width,
+			clamp_start, vis_start, span_hz);
+		int px_stop = panadapter_view_frequency_x(f->x, f->width,
+			clamp_stop, vis_start, span_hz);
 		px_stop = MAX(px_start + 1, px_stop);
 		int   px_width = px_stop - px_start;
 
@@ -4457,7 +4197,6 @@ void draw_spectrum(struct field *f_spectrum, cairo_t *gfx)
 	int grid_height, bw_high, bw_low, pitch, tx_pitch;
 	struct field *f;
 	long freq;
-	char freq_text[20];
 
 	if (in_tx)
 	{
@@ -4491,7 +4230,8 @@ void draw_spectrum(struct field *f_spectrum, cairo_t *gfx)
 	bw_high = atoi(get_field("r1:high")->value);
 	bw_low = atoi(get_field("r1:low")->value);
 	grid_height = f_spectrum->height - ((font_table[STYLE_SMALL].height * 4) / 3);
-	const int tuned_x = spectrum_tuned_x(f_spectrum, display_freq, view_start, span_hz);
+	const int tuned_x = panadapter_view_frequency_x(f_spectrum->x,
+		f_spectrum->width, display_freq, view_start, span_hz);
 
 	// calculate the position of bandwidth strip
 	long filter_freq_start, filter_freq_stop;
@@ -4499,20 +4239,26 @@ void draw_spectrum(struct field *f_spectrum, cairo_t *gfx)
 
 	if (!strcmp(mode_f->value, "CWR") || !strcmp(mode_f->value, "LSB"))
 	{
-		pitch = spectrum_frequency_x(f_spectrum, display_freq - pitch, view_start, span_hz);
+		pitch = panadapter_view_frequency_x(f_spectrum->x, f_spectrum->width,
+			display_freq - pitch, view_start, span_hz);
 	}
 	else if (!strcmp(mode_f->value, "AM") || !strcmp(mode_f->value, "FM"))
 	{
 		// For AM/FM mode, cover both sidebands
-		pitch = spectrum_frequency_x(f_spectrum, display_freq, view_start, span_hz);
+		pitch = panadapter_view_frequency_x(f_spectrum->x, f_spectrum->width,
+			display_freq, view_start, span_hz);
 	}
 	else
 	{
-		pitch = spectrum_frequency_x(f_spectrum, display_freq + pitch, view_start, span_hz);
-		tx_pitch = spectrum_frequency_x(f_spectrum, freq + tx_pitch, view_start, span_hz);
+		pitch = panadapter_view_frequency_x(f_spectrum->x, f_spectrum->width,
+			display_freq + pitch, view_start, span_hz);
+		tx_pitch = panadapter_view_frequency_x(f_spectrum->x, f_spectrum->width,
+			freq + tx_pitch, view_start, span_hz);
 	}
-	int filter_start = spectrum_frequency_x(f_spectrum, filter_freq_start, view_start, span_hz);
-	int filter_stop = spectrum_frequency_x(f_spectrum, filter_freq_stop, view_start, span_hz);
+	int filter_start = panadapter_view_frequency_x(f_spectrum->x,
+		f_spectrum->width, filter_freq_start, view_start, span_hz);
+	int filter_stop = panadapter_view_frequency_x(f_spectrum->x,
+		f_spectrum->width, filter_freq_stop, view_start, span_hz);
 	int filter_width = MAX(0, filter_stop - filter_start);
 
 	// clear the spectrum
@@ -4522,7 +4268,8 @@ void draw_spectrum(struct field *f_spectrum, cairo_t *gfx)
 	fill_rect(gfx, filter_start, f->y, filter_width, grid_height, SPECTRUM_BANDWIDTH);
 	cairo_stroke(gfx);
 
-	draw_spectrum_grid(f_spectrum, gfx, view_start, span_hz);
+	panadapter_renderer_draw_grid(gfx, f_spectrum->x, f_spectrum->y,
+		f_spectrum->width, grid_height, view_start, span_hz);
 	// Draw color-coded license privilege band strip along the bottom of the grid
 	draw_oob_band_strip(f_spectrum, gfx, display_freq, span_hz, grid_height);
 	f = f_spectrum;
@@ -4923,34 +4670,8 @@ void draw_spectrum(struct field *f_spectrum, cairo_t *gfx)
 		}
 	}
 
-	// draw the frequency readout at the bottom
-	cairo_set_source_rgb(gfx, palette[COLOR_TEXT_MUTED][0],
-					 palette[COLOR_TEXT_MUTED][1], palette[COLOR_TEXT_MUTED][2]);
-
-	const int grid_step = panadapter_grid_step_hz(span_hz);
-	const int64_t view_stop = (int64_t)view_start + span_hz;
-	for (int64_t nominal = panadapter_grid_first_hz(view_start - grid_step, grid_step);
-		 nominal <= view_stop + grid_step; nominal += grid_step) {
-		const int64_t frequency = panadapter_grid_label_hz(nominal, span_hz, grid_step);
-		if (frequency <= view_start || frequency >= view_stop)
-			continue;
-		const long label_frequency = (long)frequency;
-		if (span_hz >= 10000)
-			snprintf(freq_text, sizeof(freq_text), "%ld", label_frequency / 1000);
-		else
-		{
-			double label_khz = (label_frequency % 1000000) / 1000.0;
-			if (grid_step >= 100)
-				snprintf(freq_text, sizeof(freq_text), "%5.1f", label_khz);
-			else if (grid_step >= 10)
-				snprintf(freq_text, sizeof(freq_text), "%6.2f", label_khz);
-			else
-				snprintf(freq_text, sizeof(freq_text), "%7.3f", label_khz);
-		}
-		const int label_x = spectrum_frequency_x(f, label_frequency, view_start, span_hz);
-		int off = measure_text(gfx, freq_text, STYLE_SMALL) / 2;
-		draw_text(gfx, label_x - off, f->y + grid_height, freq_text, STYLE_SMALL);
-	}
+	panadapter_renderer_draw_labels(gfx, f->x, f->y, f->width, grid_height,
+		view_start, span_hz);
 
 	//--- S-Meter test W2JON
 	// Only show S-meter if we're not transmitting in LSB, USB, or AM modes
@@ -5032,141 +4753,21 @@ void draw_spectrum(struct field *f_spectrum, cairo_t *gfx)
 		}
 	}
 
-	// we only plot the second half of the bins (on the lower sideband
-	int last_y = 100;
-
-	struct spectrum_display_frame display_frame;
-	spectrum_display_frame_get(&display_frame);
-	spectrum_latency_ms = display_frame.latency_ms;
+	const struct panadapter_fft_config display_config = spectrum_fft_config();
+	struct panadapter_fft_frame display_frame;
+	panadapter_frame_get(panadapter_fft_context, &display_config, &display_frame);
+	spectrum_latency_ms = panadapter_fft_frame_latency_ms(&display_frame);
 	waterfall_live_sample_end = display_frame.sample_end;
-	prepare_spectrum_history(&display_frame);
+	prepare_spectrum_history(&display_frame, mode_id(mode_f->value));
 	int n_bins = display_frame.count;
 
-	float x_step = (1.0 * f->width) / n_bins;
-
-	// start the plot
-	cairo_set_source_rgb(gfx, palette[SPECTRUM_PLOT][0],
-						 palette[SPECTRUM_PLOT][1], palette[SPECTRUM_PLOT][2]);
-	cairo_move_to(gfx, f->x + f->width, f->y + grid_height);
-
-	float x = 0;
-	int j = 0;
-
-	// Calculate the dynamic range
-	int min_value = INT_MAX;
-	int max_value = INT_MIN;
-
-	// Compute the time-based average spectrum
 	int averaged_spectrum[MAX_BINS];
 	compute_time_based_average(averaged_spectrum, &display_frame);
-
-	// Find min and max values for dynamic range computation
-	for (int i = 0; i < n_bins; i++)
-	{
-		int raw_value = display_frame.bins[i] + waterfall_offset;
-		if (raw_value < min_value)
-			min_value = raw_value;
-		if (raw_value > max_value)
-			max_value = raw_value;
-	}
-
-	// Prevent division by zero in case of flat input
-	int dynamic_range = max_value - min_value;
-	if (dynamic_range == 0)
-		dynamic_range = 1;
-
-	// Define a fixed stretch factor
-	float stretch_factor = 3; // Adjust to control the stretching
-
-	// Create a linear gradient for the spectrum fill
-	cairo_pattern_t *gradient = cairo_pattern_create_linear(0, f->y + grid_height, 0, f->y);
-
-	// Set antialiasing mode for smoother rendering
-	cairo_set_antialias(gfx, CAIRO_ANTIALIAS_FAST);
-
-	// Add color stops using theme palette (WATERFALL_LOW -> MID -> HIGH)
-	cairo_pattern_add_color_stop_rgba(gradient, 0.0,
-		palette[WATERFALL_LOW][0],  palette[WATERFALL_LOW][1],  palette[WATERFALL_LOW][2],
-		0.5 + scope_alpha_plus);
-	cairo_pattern_add_color_stop_rgba(gradient, 0.5,
-		palette[WATERFALL_MID][0],  palette[WATERFALL_MID][1],  palette[WATERFALL_MID][2],
-		0.7 + scope_alpha_plus);
-	cairo_pattern_add_color_stop_rgba(gradient, 1.0,
-		palette[WATERFALL_HIGH][0], palette[WATERFALL_HIGH][1], palette[WATERFALL_HIGH][2],
-		0.9 + scope_alpha_plus);
-	// Begin a new path for the filled spectrum
-	cairo_move_to(gfx, f->x + f->width, f->y + grid_height); // Start at bottom-right corner
-
-	// We want the baseline of the spectrum always to be visible at the bottom
-	// of the graph.
-	static float sp_baseline_offs = 0.0;
-
-	for (int i = 0; i < n_bins; i++)
-	{
-		int y;
-
-		// Original scaling for the waterfall (unchanged)
-		int raw_value = display_frame.bins[i] + waterfall_offset;
-		y = ((raw_value)*f->height) / 80;					 // Original linear scaling for waterfall
-
-		// Clamp y for valid range (for the waterfall)
-		if (y < 0)
-			y = 0;
-		if (y > f->height)
-			y = f->height - 1;
-
-		// Apply stretch factor and floating offset to the averaged spectrum plot
-		int enhanced_y = y;												// Start with the original y
-		float averaged_value = averaged_spectrum[i]; // Use averaged data
-
-                if (!strcmp(field_str("AUTOSCOPE"), "ON") && !in_tx)
-			averaged_value -= sp_baseline_offs; // If option set, autoadjust the spectrum baseline
-		else
-			averaged_value += waterfall_offset;
-
-		float stretched_value = averaged_value * scope_gain; // Apply stretch factor
-
-		// Scale stretched value to screen coordinates
-		enhanced_y = (int)((stretched_value * f->height) / 80 + 1);
-
-		// Clip enhanced_y to grid height
-		if (enhanced_y > grid_height)
-			enhanced_y = grid_height; // Limit to grid height
-
-		// Clip enhanced_y to zero
-		if (enhanced_y < 0)
-			enhanced_y = 0;
-
-		// Plot the spectrum line point at the center of the same pixel range used by the waterfall.
-		cairo_line_to(gfx, f->x + f->width - x - x_step / 2.0, f->y + grid_height - enhanced_y);
-
-		// Fill this bin's in-bounds waterfall pixels with the original, unenhanced y value.
-		int pixel_left = MAX(0, (int)(f->width - x - x_step));
-		int pixel_right = MIN(f->width - 1, (int)(f->width - 1 - x));
-		for (int pixel = pixel_left; pixel <= pixel_right; pixel++)
-			wf[pixel] = (y * 100) / grid_height;
-
-		x += x_step;
-	}
-
-	// We adjust slowly the baseline offset, to keep it smoothly stable where we want it in the graph
-	sp_baseline_offs -= (sp_baseline_offs - sp_baseline) / 5;
-
-	// Close the path to create a filled shape
-	cairo_line_to(gfx, f->x, f->y + grid_height); // Bottom-left corner
-	cairo_close_path(gfx);
-
-	// Apply the gradient as the fill
-	cairo_set_source(gfx, gradient);
-	cairo_fill(gfx);
-
-	// Clean up the gradient
-	cairo_pattern_destroy(gradient);
-
-	// Redraw the spectrum line on top
-	cairo_set_source_rgb(gfx, palette[SPECTRUM_PLOT][0],
-						 palette[SPECTRUM_PLOT][1], palette[SPECTRUM_PLOT][2]);
-	cairo_stroke(gfx);
+	panadapter_renderer_draw_spectrum(gfx, f->x, f->y, f->width, f->height,
+		grid_height, display_frame.bins, averaged_spectrum, n_bins,
+		waterfall_offset, scope_gain,
+		!strcmp(field_str("AUTOSCOPE"), "ON") && !in_tx,
+		sp_baseline, wf);
 
 	// Update the history buffer with the current spectrum
 	update_spectrum_history(&display_frame);
@@ -5208,7 +4809,8 @@ void draw_spectrum(struct field *f_spectrum, cairo_t *gfx)
 			long view_stop = view_start + span_hz;
 			int is_at_edge = freq < view_start || freq > view_stop;
 			int arrow_direction = freq < view_start ? -1 : 1;
-			int tx_needle_x = spectrum_frequency_x(f, freq, view_start, span_hz) - f->x;
+			int tx_needle_x = panadapter_view_frequency_x(f->x, f->width,
+				freq, view_start, span_hz) - f->x;
 			if (is_at_edge && arrow_direction < 0)
 				tx_needle_x = MIN(1, f->width - 1);
 			if (tx_needle_x >= f->width)
@@ -10474,8 +10076,17 @@ void web_get_spectrum(char *buff)
 	}
 	else
 	{
-		struct spectrum_display_frame frame;
-		spectrum_display_frame_get(&frame);
+		const int mode = mode_id(get_field("r1:mode")->value);
+		const struct panadapter_fft_config config = {
+			.display_span_hz = PANADAPTER_FULL_SPAN_HZ,
+			.center_hz = 0,
+			.is_cw = mode == MODE_CW || mode == MODE_CWR,
+			.wpm = MAX(1, get_wpm()),
+			.refresh_ms = spectrum_refresh_interval_ms(mode),
+			.display_width_px = PANADAPTER_FFT_FRAME_BINS,
+		};
+		struct panadapter_fft_frame frame;
+		panadapter_frame_get(web_panadapter_fft_context, &config, &frame);
 		strcpy(buff, "RX ");
 		for (int i = 0; i < frame.count; i++)
 		{

@@ -24,11 +24,8 @@ $(TARGET): $(OBJECTS) ft8_lib/libft8.a
 src/mongoose.o: src/mongoose.c
 	$(CC) -c $(CFLAGS) $(DEBUGFLAGS) $(INCPATH) $(MONGOOSE_FLAGS) -o $@ $<
 
-src/panadapter_fft.o: src/panadapter_fft.c
-ifdef SBITX_DEBUG
-	$(CC) -c $(CFLAGS) $(DEBUGFLAGS) $(INCPATH) -o $@ $<
-else
-	$(CC) -c $(CFLAGS) $(DEBUGFLAGS) $(INCPATH) -O3 -o $@ $<
+ifndef SBITX_DEBUG
+src/panadapter_fft.o: CFLAGS += -O3
 endif
 
 .c.o:
@@ -57,3 +54,6 @@ test-panadapter-fft:
 test-panadapter-view:
 	$(CC) -O2 -Isrc -o /tmp/sbitx-$@ tests/test_panadapter_view.c src/panadapter_view.c -lm
 	/tmp/sbitx-$@
+
+test-web-panadapter-view:
+	node tests/test_web_panadapter_view.js

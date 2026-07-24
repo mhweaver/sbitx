@@ -195,6 +195,7 @@ extern struct rx *rx_list;
 extern int freq_hdr;
 struct panadapter_fft;
 extern struct panadapter_fft *panadapter_fft_context;
+extern struct panadapter_fft *web_panadapter_fft_context;
 
 void set_lo(int frequency);
 void set_volume(double v);
