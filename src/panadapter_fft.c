@@ -79,6 +79,7 @@ static bool fft_configs_equal(const struct panadapter_fft_config *a, const struc
   return a->display_span_hz == b->display_span_hz
          && a->center_hz == b->center_hz
          && a->is_cw == b->is_cw
+         && a->is_tx == b->is_tx
          && a->display_width_px == b->display_width_px
          && (!a->is_cw || a->wpm == b->wpm);
 }

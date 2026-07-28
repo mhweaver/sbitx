@@ -14,6 +14,7 @@ struct panadapter_fft_config {
   int display_span_hz;
   int center_hz;
   int is_cw;
+  int is_tx;  // Keep RX and TX frames and smoothing state separate.
   int wpm;
   int refresh_ms;
   int display_width_px;

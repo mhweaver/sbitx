@@ -2440,6 +2440,7 @@ static struct panadapter_fft_config spectrum_fft_config(void)
 		.display_span_hz = span_hz,
 		.center_hz = center_hz,
 		.is_cw = mode == MODE_CW || mode == MODE_CWR,
+		.is_tx = in_tx,
 		.wpm = MAX(1, get_wpm()),
 		.refresh_ms = spectrum_refresh_interval_ms(mode),
 		.display_width_px = MAX(1, spectrum->width),
@@ -4079,15 +4080,14 @@ static void compute_time_based_average(int *averaged_spectrum,
 		}
 	}
 
-	// Compute the average and the minimum
-	sp_baseline = averaged_spectrum[0];
 	for (int bin = 0; bin < n_bins; bin++)
-	{
 		averaged_spectrum[bin] /= scope_avg;
-		// Store the lowest value for the avg
-		if ((bin == 0) || (sp_baseline > averaged_spectrum[bin]))
+
+	// Find the minimum after averaging; FFT bins are signed dB values.
+	sp_baseline = averaged_spectrum[0];
+	for (int bin = 1; bin < n_bins; bin++)
+		if (sp_baseline > averaged_spectrum[bin])
 			sp_baseline = averaged_spectrum[bin];
-	}
 }
 
 static void draw_oob_band_strip(struct field *f, cairo_t *gfx,

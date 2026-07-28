@@ -243,6 +243,14 @@ int main(void)
 		wait_for_frame(context, &config, generation);
 	assert(peak_level(&keyed) - peak_level(&gap) > 40);
 
+	config.is_tx = 1;
+	struct panadapter_fft_frame stale_rx;
+	assert(!panadapter_fft_get_frame(context, &config, &stale_rx));
+	push_signal(context, 7000, 500.0, 0.25);
+	const struct panadapter_fft_frame tx =
+		wait_for_frame(context, &config, gap.generation);
+	assert(tx.config.is_tx);
+
 	struct panadapter_fft *const second_context = panadapter_fft_create();
 	assert(second_context);
 	struct panadapter_fft_config second_config = {
@@ -256,7 +264,7 @@ int main(void)
 	panadapter_fft_destroy(second_context);
 	struct panadapter_fft_frame primary_after_second;
 	assert(panadapter_fft_get_frame(context, &config, &primary_after_second));
-	assert(primary_after_second.generation == gap.generation);
+	assert(primary_after_second.generation == tx.generation);
 
 	panadapter_fft_destroy(context);
 	puts("panadapter FFT tests passed");
