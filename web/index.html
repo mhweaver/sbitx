@@ -2030,26 +2030,23 @@
 
     spectrumCanvas.addEventListener("wheel", handlePanadapterWheel, { passive: false });
     waterfallCanvas.addEventListener("wheel", handlePanadapterWheel, { passive: false });
-    el("panadapter-zoom-out").addEventListener("click", (event) => {
+    const panadapterControlActions = {
+        "panadapter-zoom-out": () => panadapterZoom(1 / 1.4),
+        "panadapter-zoom-in": () => panadapterZoom(1.4),
+        "panadapter-pan-left": () => panadapterPan(-0.2),
+        "panadapter-pan-right": () => panadapterPan(0.2),
+        "panadapter-reset": () => {
+            PanadapterView.reset(panadapterView);
+            panadapterViewChanged();
+        }
+    };
+    el("panadapter-controls").addEventListener("click", (event) => {
+        const button = event.target.closest("button");
+        const action = button && panadapterControlActions[button.id];
+        if (!action)
+            return;
         event.stopPropagation();
-        panadapterZoom(1 / 1.4);
-    });
-    el("panadapter-zoom-in").addEventListener("click", (event) => {
-        event.stopPropagation();
-        panadapterZoom(1.4);
-    });
-    el("panadapter-pan-left").addEventListener("click", (event) => {
-        event.stopPropagation();
-        panadapterPan(-0.2);
-    });
-    el("panadapter-pan-right").addEventListener("click", (event) => {
-        event.stopPropagation();
-        panadapterPan(0.2);
-    });
-    el("panadapter-reset").addEventListener("click", (event) => {
-        event.stopPropagation();
-        PanadapterView.reset(panadapterView);
-        panadapterViewChanged();
+        action();
     });
     panadapterViewChanged();
 

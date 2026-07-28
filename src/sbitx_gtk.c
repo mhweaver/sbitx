@@ -3410,63 +3410,34 @@ static void waterfall_history_start(void);
 static void waterfall_history_schedule(void);
 static void waterfall_history_snapshot(void);
 
-static __attribute__((optimize("O3"))) void remap_waterfall(
+static void remap_waterfall(
 							const struct panadapter_view *old_view,
 							const struct panadapter_view *new_view)
 {
-	if (!waterfall_map)
+	if (!waterfall_pixbuf)
 		return;
-	struct field *waterfall = get_field("waterfall");
-	const int width = waterfall->width;
-	const int height = waterfall->height;
-	if (width < 1 || height < 1)
-		return;
-	const size_t bytes = (size_t)width * height * 3;
-	guint8 *previous = malloc(bytes);
-	struct remap_column {
-		int left;
-		int right;
-		float mix;
-		bool valid;
-	} *columns = malloc((size_t)width * sizeof(*columns));
-	if (!previous || !columns) {
-		free(previous);
-		free(columns);
-		return;
-	}
-	memcpy(previous, waterfall_map, bytes);
 
-	for (int x = 0; x < width; x++) {
-		const double position = (x + 0.5) / width;
-		double old_x = panadapter_view_map_position(old_view, new_view, position)
-			* width - 0.5;
-		columns[x].valid = old_x >= -0.5 && old_x <= width - 0.5;
-		if (columns[x].valid) {
-			old_x = MAX(0.0, MIN(width - 1.0, old_x));
-			columns[x].left = (int)floor(old_x);
-			columns[x].right = MIN(width - 1, columns[x].left + 1);
-			columns[x].mix = old_x - columns[x].left;
-		}
-	}
+	GdkPixbuf *previous = gdk_pixbuf_copy(waterfall_pixbuf);
+	if (!previous)
+		return;
 
-	for (int y = 0; y < height; y++) {
-		for (int x = 0; x < width; x++) {
-			guint8 *pixel = waterfall_map + ((size_t)y * width + x) * 3;
-			if (!columns[x].valid) {
-				memset(pixel, 0, 3);
-				continue;
-			}
-			const guint8 *left_pixel = previous +
-				((size_t)y * width + columns[x].left) * 3;
-			const guint8 *right_pixel = previous +
-				((size_t)y * width + columns[x].right) * 3;
-			for (int channel = 0; channel < 3; channel++)
-				pixel[channel] = (guint8)(left_pixel[channel] +
-					(right_pixel[channel] - left_pixel[channel]) * columns[x].mix + 0.5f);
-		}
+	const int width = gdk_pixbuf_get_width(waterfall_pixbuf);
+	const int height = gdk_pixbuf_get_height(waterfall_pixbuf);
+	const double scale = old_view->zoom / new_view->zoom;
+	const double source_x = panadapter_view_map_position(old_view, new_view,
+		0.5 / width) * width - 0.5;
+	const int first = MAX(0, (int)ceil((-0.5 - source_x) / scale));
+	const int last = MIN(width - 1,
+		(int)floor((width - 0.5 - source_x) / scale));
+
+	gdk_pixbuf_fill(waterfall_pixbuf, 0x000000ff);
+	if (first <= last) {
+		gdk_pixbuf_scale(previous, waterfall_pixbuf,
+			first, 0, last - first + 1, height,
+			-source_x / scale, 0, 1.0 / scale, 1.0,
+			GDK_INTERP_BILINEAR);
 	}
-	free(columns);
-	free(previous);
+	g_object_unref(previous);
 }
 
 static void panadapter_view_refresh(const struct panadapter_view *previous)
@@ -3602,16 +3573,18 @@ static bool resize_waterfall(struct field *f)
 		}
 
 		const int rows = MIN(waterfall_storage_height, new_height);
-		if (waterfall_map && waterfall_storage_width > 0) {
-			for (int y = 0; y < rows; y++) {
-				for (int x = 0; x < f->width; x++) {
-					const int old_x = (int)((int64_t)x *
-						waterfall_storage_width / f->width);
-					memcpy(new_map + ((size_t)y * f->width + x) * 3,
-						waterfall_map + ((size_t)y * waterfall_storage_width + old_x) * 3,
-						3);
-				}
-			}
+		if (waterfall_map && waterfall_storage_width > 0 && rows > 0) {
+			GdkPixbuf *old_pixbuf = gdk_pixbuf_new_from_data(waterfall_map,
+				GDK_COLORSPACE_RGB, FALSE, 8, waterfall_storage_width, rows,
+				waterfall_storage_width * 3, NULL, NULL);
+			GdkPixbuf *new_pixbuf = gdk_pixbuf_new_from_data(new_map,
+				GDK_COLORSPACE_RGB, FALSE, 8, f->width, rows,
+				f->width * 3, NULL, NULL);
+			gdk_pixbuf_scale(old_pixbuf, new_pixbuf, 0, 0, f->width, rows,
+				0, 0, (double)f->width / waterfall_storage_width, 1.0,
+				GDK_INTERP_NEAREST);
+			g_object_unref(old_pixbuf);
+			g_object_unref(new_pixbuf);
 		}
 			if (waterfall_history_rows)
 				memcpy(new_rows, waterfall_history_rows,
