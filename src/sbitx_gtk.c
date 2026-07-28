@@ -6208,6 +6208,7 @@ int do_spectrum(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
 	long freq;
 	char buff[100];
 	int mode = mode_id(get_field("r1:mode")->value);
+	static double drag_remainder;
 
 	// Check if we need to handle tap to reveal display during remote session
 	if (event == GDK_BUTTON_PRESS && is_remote_browser_active() && !is_localhost_connection_only()) {
@@ -6244,14 +6245,19 @@ int do_spectrum(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
 		freq = atoi(f_freq->value);
 		span = spectrum_display_span_hz();
 		// a has the x position of the mouse
-		freq -= ((a - last_mouse_x) * (span / f->width));
+		const double drag_hz = drag_remainder
+			+ (double)(a - last_mouse_x) * span / f->width;
+		const long rounded_drag_hz = lround(drag_hz);
+		drag_remainder = drag_hz - rounded_drag_hz;
+		freq -= rounded_drag_hz;
 		sprintf(buff, "%ld", freq);
 		set_field("r1:freq", buff);
 		return 1;
 		break;
 	case GDK_BUTTON_PRESS:
-		if (c == GDK_BUTTON_SECONDARY)
-		{ // right click QSY
+		if (c == GDK_BUTTON_PRIMARY || c == GDK_BUTTON_SECONDARY)
+		{ // tap or right click to QSY
+			drag_remainder = 0;
 			f_freq = get_field("r1:freq");
 			freq = atoi(f_freq->value);
 			span = spectrum_display_span_hz();
