@@ -476,10 +476,10 @@
                         <button id="panadapter-pan-right" aria-label="Pan right" title="Pan right">
                             <svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"></path></svg>
                         </button>
-                        <button id="panadapter-reset" aria-label="Show full 25 kHz" title="Show full 25 kHz">
+                        <button id="panadapter-reset" aria-label="Show full 48 kHz" title="Show full 48 kHz">
                             <svg viewBox="0 0 24 24"><path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"></path></svg>
                         </button>
-                        <span id="panadapter-span">25 kHz</span>
+                        <span id="panadapter-span">48 kHz</span>
                     </div>
                 </div>
             </section>
@@ -1586,7 +1586,7 @@
 
     var waterfall_image = null;
 
-    const PANADAPTER_BANDWIDTH_HZ = 25000;
+    const PANADAPTER_BANDWIDTH_HZ = 48000;
     const panadapterView = PanadapterView.create(PANADAPTER_BANDWIDTH_HZ, 64);
 
     function spectrumTunedX(width) {

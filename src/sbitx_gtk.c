@@ -246,7 +246,7 @@ struct spectrum_history_state {
 };
 static struct spectrum_history_state spectrum_history;
 static int spectrum_latency_ms = -1;
-#define PANADAPTER_FULL_SPAN_HZ 25000
+#define PANADAPTER_FULL_SPAN_HZ 48000
 static struct panadapter_view panadapter_view = {1.0, 0.0};
 
 #define MIN_WATERFALL_HEIGHT 10 // Define a minimum safe height

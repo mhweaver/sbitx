@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define PANADAPTER_VIEW_MAX_ZOOM 500.0
+#define PANADAPTER_VIEW_MAX_ZOOM 960.0
 
 struct panadapter_view {
   double zoom;
