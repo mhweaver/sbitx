@@ -102,6 +102,11 @@ int web_get_console(char *buff, int max);
 int extract_single_semantic(const char* text, int text_len, text_span_semantic span, char *out, int outlen);
 int extract_semantic(const char* text, int text_len, const text_span_semantic* spans, sbitx_style sem, char *out, int outlen);
 int console_extract_semantic(uint32_t row, sbitx_style sem, char *out, int outlen);
+// Full line+spans lookup by the ever-incrementing row number (spans[0].start_row), not a
+// console_stream[] array index. On success returns 0 and sets *out_text/*out_len/*out_spans
+// to point directly at the stored line (valid until the console buffer wraps); returns -1 if
+// that row isn't found (e.g. it already scrolled out of the ring buffer).
+int console_line_by_row(uint32_t row, const char **out_text, int *out_len, const text_span_semantic **out_spans);
 
 int is_in_tx();
 void abort_tx();

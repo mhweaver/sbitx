@@ -1088,6 +1088,12 @@ struct field main_controls[] = {
 	 "BLANK/LEFT/RIGHT/CROSSHAIR", 0, 0, 0, 0},
 	{"recent_qso_age", NULL, 1000, -1000, 50, 50, "RECENT_QSO_AGE", 40, "24", FIELD_NUMBER, STYLE_FIELD_VALUE,
 	 "", 0, 99999, 1, 0}, // age in hours that we consider "recent" enough to avoid calling again
+	{"#ftx_queue_max", NULL, 1000, -1000, 50, 50, "FTX_QUEUE_MAX", 40, "5", FIELD_NUMBER, STYLE_FIELD_VALUE,
+	 "", 0, FTX_QUEUE_CAP, 1, 0}, // max waiting callers to queue while a QSO is in progress (not counting the active QSO)
+	{"#ftx_queue_full", NULL, 1000, -1000, 50, 50, "FTX_QUEUE_FULL", 40, "REJECT", FIELD_SELECTION, STYLE_FIELD_VALUE,
+	 "REJECT/DROP_OLDEST/DROP_NEWEST/DROP_LOWEST_PRI", 0, 0, 0, 0}, // what to do when a new caller arrives and the queue is already full
+	{"#ftx_click_behavior", NULL, 1000, -1000, 50, 50, "FTX_CLICK_BEHAVIOR", 40, "REPLACE", FIELD_SELECTION, STYLE_FIELD_VALUE,
+	 "REPLACE/ENQUEUE/SWITCH", 0, 0, 0, 0}, // clicking a different station's line while mid-QSO: abandon it, queue the click, or suspend-and-resume it
 
 	// parametric 5-band eq controls  ( BX[F|G|B] = Band# Frequency | Gain | Bandwidth W2JON
 	{"#eq_b0f", do_eq_edit, 1000, -1000, 40, 40, "B0F", 40, "80", FIELD_NUMBER, STYLE_FIELD_VALUE,
@@ -2210,6 +2216,17 @@ int console_extract_semantic(uint32_t row, sbitx_style sem, char *out, int outle
 		console_stream[line].spans, sem, out, outlen);
 }
 
+int console_line_by_row(uint32_t row, const char **out_text, int *out_len, const text_span_semantic **out_spans)
+{
+	struct console_line *line = console_get_line(row);
+	if (!line)
+		return -1;
+	*out_text = line->text;
+	*out_len = line->spans[0].length;
+	*out_spans = line->spans;
+	return 0;
+}
+
 int do_console(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
 {
 	char buff[100], *p, *q;
@@ -2264,7 +2281,7 @@ int do_console(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
 		if (!strncmp(get_field("r1:mode")->value, "FT", 2)) {
 			ftx_call_or_continue(console_stream[console_selected_line].text,
 				strlen(console_stream[console_selected_line].text),
-				console_stream[console_selected_line].spans);
+				console_stream[console_selected_line].spans, true);
 		}
 		f->is_dirty = 1;
 		return 1;
@@ -11974,7 +11991,7 @@ void cmd_exec(char *cmd)
 		struct console_line *line = console_get_line(atoi(args));
 		printf("selectline %s %s\n", args, line ? line->text : "");
 		if (line)
-			ftx_call_or_continue(line->text, line->spans[0].length, line->spans);
+			ftx_call_or_continue(line->text, line->spans[0].length, line->spans, true);
 	}
 	else if (!strcasecmp(exec, "callsign"))
 	{

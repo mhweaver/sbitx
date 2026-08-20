@@ -28,6 +28,10 @@ GLIB_LIBS = $(shell pkg-config --libs glib-2.0)
 TEST_SOURCES_dxcc = $(CLU_SOURCES)
 TEST_CFLAGS_dxcc = -Iclu/src $(GLIB_CFLAGS)
 TEST_EXTRA_LIBS_dxcc = $(GLIB_LIBS)
+# modem_ft8.c needs the real ft8_lib message codec plus GTK/glib types (for the dxcc/locator
+# headers it includes), unlike the plain single-file tests the generic rule below handles.
+TEST_CFLAGS_modem_ft8 = -I. -Iclu/src $(GLIB_CFLAGS)
+TEST_EXTRA_LIBS_modem_ft8 = $(FFTOBJ) ft8_lib/libft8.a
 
 $(TARGET): $(OBJECTS) ft8_lib/libft8.a
 	$(LINK) $(LFLAGS) -o $(TARGET) $(OBJECTS) $(FFTOBJ) $(LIBPATH) $(LIBS)
@@ -56,10 +60,24 @@ clean:
 	-rm -f $(TARGET)
 
 .PHONY: test
-test: $(TEST_C_TARGETS)
-	@set -e; for test in $(TEST_C_TARGETS); do echo "Running $$test"; $$test; done
-	@set -e; for test in $(TEST_JS_SOURCES); do echo "Running $$test"; node $$test; done
-	@set -e; for test in $(TEST_SH_SOURCES); do echo "Running $$test"; sh $$test; done
+test:
+	@status=0; \
+	for target in $(TEST_C_TARGETS); do \
+		if $(MAKE) $$target; then \
+			echo "Running $$target"; \
+			$$target || status=1; \
+		else \
+			echo "SKIPPED $$target (failed to build)"; \
+			status=1; \
+		fi; \
+	done; \
+	for test in $(TEST_JS_SOURCES); do echo "Running $$test"; node $$test || status=1; done; \
+	for test in $(TEST_SH_SOURCES); do echo "Running $$test"; sh $$test || status=1; done; \
+	exit $$status
 
-/tmp/sbitx-test_%: tests/test_%.c
+# `make test-modem_ft8` builds and runs a single C test by name (matches tests/test_<name>.c).
+test-%: /tmp/sbitx-test_%
+	/tmp/sbitx-test_$*
+
+/tmp/sbitx-test_%: tests/test_%.c ft8_lib/libft8.a
 	$(CC) -O2 -Isrc $(TEST_CFLAGS_$*) -o $@ $< $(or $(TEST_SOURCES_$*),src/$*.c) $(TEST_LIBS) $(TEST_EXTRA_LIBS_$*)
