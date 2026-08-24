@@ -14,6 +14,11 @@ void ftx_call_or_continue(const char* line, int line_len, const text_span_semant
 // without needing to fake the wallclock.
 bool ftx_slot_has_room(int slot_relative_ms, bool is_ft4);
 
+// If anything is queued, pops the front entry and acts on it (transmits/resumes as
+// appropriate). Normally happens automatically once a QSO completes (got 73); also called
+// after an ESC-aborted QSO so an abandoned attempt doesn't leave the rest of the queue stranded.
+void ftx_queue_dequeue_next(void);
+
 // Exposed (non-static) purely so tests can introspect the FTx caller queue's contents/order
 // without a general-purpose API: rank 0 is the next callsign ftx_queue_dequeue_next() would act on.
 int ftx_queue_count(void);

@@ -9532,6 +9532,9 @@ static gboolean on_key_press(GtkWidget *widget, GdkEventKey *event, gpointer use
 		modem_abort(true);
 		tx_off();
 		call_wipe();
+		// Abandoning this QSO shouldn't strand anyone waiting in the FTx queue -- pick up the
+		// next one, same as when a QSO completes normally. A no-op if nothing is queued.
+		ftx_queue_dequeue_next();
 		break;
 	case MIN_KEY_UP:
 		if (f_focus == NULL && f_hover > active_layout)

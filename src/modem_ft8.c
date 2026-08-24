@@ -89,7 +89,7 @@ static ftx_pending_caller ftx_queue[FTX_QUEUE_CAP];
 static int ftx_queue_n = 0;
 static long ftx_queue_back_seq = 0;   // next seq for a normal (back-of-queue) insert, increases
 static long ftx_queue_front_seq = -1; // next seq for a SWITCH-suspend (front-of-queue) insert, decreases (LIFO)
-static void ftx_queue_dequeue_next(void);
+void ftx_queue_dequeue_next(void);
 
 // Everything ftx_call_or_continue() needs out of a single decoded/clicked line.
 typedef struct {
@@ -1372,8 +1372,13 @@ void ft8_poll(int tx_is_on){
 			tx_off();
 			ftx_repeat = ftx_repeat_save;
 			if (!ftx_repeat) {
-				if (strcmp(field_str("FTX_AUTO"), "OFF"))
+				if (strcmp(field_str("FTX_AUTO"), "OFF")) {
 					call_wipe();
+					// Giving up on this caller (no reply after FTX_REPEAT tries) shouldn't
+					// strand anyone waiting in the queue -- move on, same as a normal
+					// completion or an ESC-aborted QSO. No-op if nothing is queued.
+					ftx_queue_dequeue_next();
+				}
 				ft8_abort(true);
 				ftx_tx_text[0] = 0;
 			}
@@ -1719,7 +1724,7 @@ static ftx_pending_caller* ftx_queue_insert(const ftx_pending_caller* seed, bool
 	recently SWITCH-suspended, whichever sorts first) and acts on it -- no re-parsing needed,
 	it's already an accumulated record.
 */
-static void ftx_queue_dequeue_next(void)
+void ftx_queue_dequeue_next(void)
 {
 	if (ftx_queue_n <= 0)
 		return;
