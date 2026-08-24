@@ -1827,10 +1827,12 @@ void ftx_call_or_continue(const char* line, int line_len, const text_span_semant
 
 	const char *current_call = field_str("CALL");
 	bool qso_in_progress = current_call[0] && strcmp(current_call, msg.caller);
-	// LOG_INFO (not LOG_DEBUG) so this is visible without changing LOG_LEVEL: this is the
-	// exact decision point that determines whether a click queues or hijacks the active QSO.
-	LOG(LOG_INFO, "ftx_call_or_continue: clicked '%s' is_click=%d CALL='%s' qso_in_progress=%d click_behavior='%s'\n",
-		msg.caller, is_click, current_call, qso_in_progress, is_click ? field_str("FTX_CLICK_BEHAVIOR") : "n/a (auto)");
+	// LOG_INFO (not LOG_DEBUG) so this prints alongside the "<<"/"->"/">>" trace lines already
+	// on stderr: this is the exact decision point that determines whether a click queues or
+	// hijacks the active QSO.
+	LOG(LOG_INFO, "   ftx: clicked '%s' is_click=%d CALL='%s' qip=%d behavior='%s'\n",
+		msg.caller, is_click, current_call, qso_in_progress,
+		is_click ? field_str("FTX_CLICK_BEHAVIOR") : "n/a (auto)");
 
 	if (qso_in_progress) {
 		const char *policy = is_click ? field_str("FTX_CLICK_BEHAVIOR") : "ENQUEUE";
