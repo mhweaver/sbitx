@@ -2149,7 +2149,6 @@ void draw_console(cairo_t* gfx, struct field* f)
 			strncpy(buf, ftx_queue_callsign_at(i), sizeof(buf) - 1);
 			buf[sizeof(buf) - 1] = 0;
 			draw_text(gfx, box_x + 4, row_top, buf, STYLE_FT8_QUEUED);
-			rect(gfx, btn_x, row_top, FTX_QUEUE_BOX_BTN_W, row_h, COLOR_CONTROL_BOX, 1);
 			draw_text(gfx, btn_x + 4, row_top, "X", STYLE_MYCALL);
 		}
 	}
