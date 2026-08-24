@@ -2109,6 +2109,35 @@ void draw_console(cairo_t* gfx, struct field* f)
 			start_line = 0;
 	}
 
+	// Overlay a small box in the upper-right corner of the console listing the
+	// FTx caller queue, front of queue (next to be worked) on top. No box at all
+	// when the queue is empty.
+	int queue_n = ftx_queue_count();
+	if (queue_n > 0) {
+		char buf[16];
+		int row_h = font_table[STYLE_FT8_QUEUED].height + 4;
+		int box_w = 0;
+		for (int i = 0; i < queue_n; i++) {
+			strncpy(buf, ftx_queue_callsign_at(i), sizeof(buf) - 1);
+			buf[sizeof(buf) - 1] = 0;
+			int w = measure_text(gfx, buf, STYLE_FT8_QUEUED) + 8;
+			if (w > box_w)
+				box_w = w;
+		}
+		int box_h = queue_n * row_h + 4;
+		int box_x = f->x + f->width - box_w;
+		int box_y = f->y;
+		fill_rect(gfx, box_x, box_y, box_w, box_h, COLOR_BACKGROUND);
+		rect(gfx, box_x, box_y, box_w, box_h, COLOR_CONTROL_BOX, 1);
+		int ty = box_y + 2;
+		for (int i = 0; i < queue_n; i++) {
+			strncpy(buf, ftx_queue_callsign_at(i), sizeof(buf) - 1);
+			buf[sizeof(buf) - 1] = 0;
+			draw_text(gfx, box_x + 4, ty, buf, STYLE_FT8_QUEUED);
+			ty += row_h;
+		}
+	}
+
 	// restore embiggen'd font height
 	if (bigfont_enabled) {
 		for (int i = STYLE_LOG; i <= STYLE_TELNET; i++) {

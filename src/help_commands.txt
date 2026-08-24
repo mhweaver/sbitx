@@ -652,6 +652,28 @@ FT8 / FT4 Mode Controls
   Keep TX_PITCH between 1000 and 2000 Hz for best results and to stay within
   the standard FT8 sub-band. Default: 1500 Hz.
 
+* FTX_QUEUE_MAX [0-16]
+  Sets how many waiting callers can queue up while a QSO is in progress
+  (the active QSO itself doesn't count against this limit). Default: 5.
+
+* FTX_QUEUE_FULL [mode]
+  Controls what happens when a new caller arrives and the queue is already
+  full:
+  REJECT          -- ignore the new caller; the queue is left unchanged.
+  DROP_OLDEST     -- drop the longest-waiting queued caller to make room.
+  DROP_NEWEST     -- drop the most-recently-queued caller to make room.
+  DROP_LOWEST_PRI -- drop whichever queued caller has the lowest priority.
+  Default: REJECT.
+
+* FTX_CLICK_BEHAVIOR [mode]
+  Controls what happens when you click a different station's line while a
+  QSO is already in progress:
+  REPLACE -- abandon the active contact and work the clicked one now.
+  ENQUEUE -- add the clicked contact to the queue; keep working the active one.
+  SWITCH  -- pause the active contact (returning to it automatically once
+             the new one is done or displaced) and work the clicked one now.
+  Default: REPLACE (matches behaviour prior to the FTx caller queue).
+
 #Logger Controls
 
 The logger fields appear at the bottom of the screen when the keyboard is open.
