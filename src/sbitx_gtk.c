@@ -12580,25 +12580,39 @@ else if (!strcasecmp(exec, "decode"))
 		struct field *f = get_field_by_label(exec);
 		if (f)
 		{
-			// convert all the letters to uppercase
-			for (char *p = args; *p; p++)
-				*p = toupper(*p);
-			if (set_field(f->cmd, args))
+			if (!args[0])
 			{
-				write_console(STYLE_LOG, "Invalid setting:");
-				printf("Invalid setting: %s=%s\n", f->cmd, args);
+				// No value given (e.g. just querying): report the current value.
+				// set_field("", ...) below would otherwise silently overwrite it --
+				// FIELD_NUMBER clamps atoi("") == 0 into range, and FIELD_SELECTION
+				// falls back to the *last* option in the list -- either way, asking
+				// "what is this set to?" would have the side effect of changing it.
+				char msg[64];
+				snprintf(msg, sizeof(msg), "%s = %s\n", f->label, f->value);
+				write_console(STYLE_LOG, msg);
 			}
 			else
 			{
-				// this is an extract from focus_field()
-				// it shifts the focus to the updated field
-				// without toggling/jumping the value
-				struct field *prev_hover = f_hover;
-				struct field *prev_focus = f_focus;
-				f_focus = NULL;
-				f_focus = f_hover = f;
-				focus_since = millis();
-				update_field(f_hover);
+				// convert all the letters to uppercase
+				for (char *p = args; *p; p++)
+					*p = toupper(*p);
+				if (set_field(f->cmd, args))
+				{
+					write_console(STYLE_LOG, "Invalid setting:");
+					printf("Invalid setting: %s=%s\n", f->cmd, args);
+				}
+				else
+				{
+					// this is an extract from focus_field()
+					// it shifts the focus to the updated field
+					// without toggling/jumping the value
+					struct field *prev_hover = f_hover;
+					struct field *prev_focus = f_focus;
+					f_focus = NULL;
+					f_focus = f_hover = f;
+					focus_since = millis();
+					update_field(f_hover);
+				}
 			}
 		}
 	}
