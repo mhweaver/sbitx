@@ -7743,6 +7743,10 @@ int do_mode_dropdown(struct field *f, cairo_t *gfx, int event, int a, int b, int
 
 			// Auto-set frequency when switching TO FT4 or FT8
 			set_ftx_frequency(mode_id(f->value));
+
+			// Anyone queued was heard in the mode we're leaving; they're not reachable
+			// (or even still being decoded) in the new one.
+			ftx_queue_clear();
 		}
 
 		return result;
@@ -11337,6 +11341,7 @@ void change_band(char *request)
 	set_field("#selband", buff); // signals web app to clear lists
 	q_empty(&q_web);			 // Clear old messages in queue
 	console_init();				 // Clear old FT8 messages
+	ftx_queue_clear();			 // Anyone queued was heard on the band we're leaving
 
 	// this fixes bug with filter settings not being applied after a band change, not sure why it's a bug - k3ng 2022-09-03
 	//  set_field("r1:low",get_field("r1:low")->value);
@@ -11625,6 +11630,8 @@ void do_control_action(char *cmd)
 	else if (!strcmp(request, "WIPE"))
 	{
 		call_wipe();
+		// Don't strand anyone waiting in the FTx queue; no-op if nothing is queued.
+		ftx_queue_dequeue_next();
 	}
 	else if (!strcmp(request, "ESC"))
 	{
@@ -11634,6 +11641,8 @@ void do_control_action(char *cmd)
 		field_set("TEXT", "");
 		modem_abort(true);
 		tx_off();
+		// Don't strand anyone waiting in the FTx queue; no-op if nothing is queued.
+		ftx_queue_dequeue_next();
 	}
 	else if (!strcmp(request, "TX"))
 	{
@@ -11901,8 +11910,15 @@ void do_control_action(char *cmd)
 			set_operating_freq(atoi(request + 5), response);
 		else if (!strncmp(request, "MODE ", 5))
 		{
+			char old_mode[20];
+			strncpy(old_mode, field_str("MODE"), sizeof(old_mode) - 1);
+			old_mode[sizeof(old_mode) - 1] = 0;
 			set_radio_mode(request + 5);
 			update_field(get_field("r1:mode"));
+			// Anyone queued was heard in the mode we're leaving; they're not reachable
+			// (or even still being decoded) in the new one.
+			if (strcmp(old_mode, field_str("MODE")))
+				ftx_queue_clear();
 		}
 		else
 		{
@@ -12363,8 +12379,15 @@ else if (!strcasecmp(exec, "decode"))
 	}
 	else if (!strcasecmp(exec, "mode") || !strcasecmp(exec, "m"))
 	{
+		char old_mode[20];
+		strncpy(old_mode, field_str("MODE"), sizeof(old_mode) - 1);
+		old_mode[sizeof(old_mode) - 1] = 0;
 		set_radio_mode(args);
 		update_field(get_field("r1:mode"));
+		// Anyone queued was heard in the mode we're leaving; they're not reachable
+		// (or even still being decoded) in the new one.
+		if (strcmp(old_mode, field_str("MODE")))
+			ftx_queue_clear();
 	}
   else if (!strcasecmp(exec, "cwreverse"))
   {

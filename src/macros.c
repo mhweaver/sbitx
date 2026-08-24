@@ -2,7 +2,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
+#include <stdbool.h>
 #include "sdr_ui.h"
+#include "modem_ft8.h"
 
 int macro_exec(int key, char *dest);
 void macro_get_var(char *var, char *s);
@@ -170,8 +172,11 @@ void macro_get_var(char *var, char *s){
 	else if (!strcmp(var, "EXCH")){
 		strcpy(s, field_str("NR"));
 	}
-	else if (!strcmp(var, "WIPE"))
+	else if (!strcmp(var, "WIPE")) {
 		call_wipe();
+		// Don't strand anyone waiting in the FTx queue; no-op if nothing is queued.
+		ftx_queue_dequeue_next();
+	}
 	else if (!strcmp(var, "SAVE")){
 		enter_qso();
 	}

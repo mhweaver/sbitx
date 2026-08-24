@@ -26,5 +26,6 @@ const char *ftx_queue_callsign_at(int rank);
 // Removes the queued caller at display rank (0 = next to be dequeued); false if out of range.
 // Used for the console's per-entry "X" (remove) button.
 bool ftx_queue_remove_at(int rank);
-// Exposed (non-static) purely so tests can clear the queue between independent test cases.
-void ftx_queue_reset_for_test(void);
+// Empties the whole queue without acting on any of it -- used when a band or mode change makes
+// everything queued unreachable, and by tests to isolate independent test cases.
+void ftx_queue_clear(void);

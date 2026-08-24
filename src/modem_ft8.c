@@ -1789,7 +1789,7 @@ bool ftx_queue_remove_at(int rank)
 	return true;
 }
 
-void ftx_queue_reset_for_test(void)
+void ftx_queue_clear(void)
 {
 	ftx_queue_n = 0;
 	ftx_queue_back_seq = 0;
