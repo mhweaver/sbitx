@@ -480,6 +480,14 @@ static int console_row_count = 0;   // number of valid entries in console_row_in
 static int console_row_y0 = 0;      // pixel y of the first drawn row
 static int console_row_height = 0;  // pixel height of each drawn row
 
+// Geometry of the FTx queue overlay box (see draw_console()), recorded each time it's drawn
+// so do_console() can hit-test clicks on each entry's "X" (remove) button. ftx_queue_box_n is
+// 0 whenever the queue was empty at the last draw, which is also what makes the hit test a
+// no-op when there's no overlay on screen to click.
+#define FTX_QUEUE_BOX_BTN_W 16
+static int ftx_queue_box_x = 0, ftx_queue_box_y = 0, ftx_queue_box_w = 0, ftx_queue_box_row_h = 0;
+static int ftx_queue_box_n = 0;
+
 // max power and swr from most recent transmission, for the log
 int last_fwdpower = 0;
 int last_vswr = 0;
@@ -2109,10 +2117,11 @@ void draw_console(cairo_t* gfx, struct field* f)
 			start_line = 0;
 	}
 
-	// Overlay a small box in the upper-right corner of the console listing the
-	// FTx caller queue, front of queue (next to be worked) on top. No box at all
-	// when the queue is empty.
+	// Overlay a small box in the upper-right corner of the console listing the FTx caller
+	// queue, front of queue (next to be worked) on top, each with an "X" button so a queued
+	// entry can be cancelled before it's ever transmitted to. No box at all when empty.
 	int queue_n = ftx_queue_count();
+	ftx_queue_box_n = queue_n;
 	if (queue_n > 0) {
 		char buf[16];
 		int row_h = font_table[STYLE_FT8_QUEUED].height + 4;
@@ -2124,17 +2133,24 @@ void draw_console(cairo_t* gfx, struct field* f)
 			if (w > box_w)
 				box_w = w;
 		}
+		box_w += FTX_QUEUE_BOX_BTN_W;
 		int box_h = queue_n * row_h + 4;
 		int box_x = f->x + f->width - box_w;
 		int box_y = f->y;
+		ftx_queue_box_x = box_x;
+		ftx_queue_box_y = box_y;
+		ftx_queue_box_w = box_w;
+		ftx_queue_box_row_h = row_h;
 		fill_rect(gfx, box_x, box_y, box_w, box_h, COLOR_BACKGROUND);
 		rect(gfx, box_x, box_y, box_w, box_h, COLOR_CONTROL_BOX, 1);
-		int ty = box_y + 2;
+		int btn_x = box_x + box_w - FTX_QUEUE_BOX_BTN_W;
 		for (int i = 0; i < queue_n; i++) {
+			int row_top = box_y + 2 + i * row_h;
 			strncpy(buf, ftx_queue_callsign_at(i), sizeof(buf) - 1);
 			buf[sizeof(buf) - 1] = 0;
-			draw_text(gfx, box_x + 4, ty, buf, STYLE_FT8_QUEUED);
-			ty += row_h;
+			draw_text(gfx, box_x + 4, row_top, buf, STYLE_FT8_QUEUED);
+			rect(gfx, btn_x, row_top, FTX_QUEUE_BOX_BTN_W, row_h, COLOR_CONTROL_BOX, 1);
+			draw_text(gfx, btn_x + 4, row_top, "X", STYLE_MYCALL);
 		}
 	}
 
@@ -2256,6 +2272,25 @@ int console_line_by_row(uint32_t row, const char **out_text, int *out_len, const
 	return 0;
 }
 
+/*!
+	If (\a x, \a y) falls on a remove ("X") button in the FTx queue overlay drawn by the last
+	draw_console() call, removes that queued caller and returns true. A no-op (returns false)
+	whenever the queue was empty at the last draw, so it doesn't interfere with normal console
+	clicks when there's no overlay on screen.
+*/
+static bool ftx_queue_box_hit_test(int x, int y)
+{
+	if (ftx_queue_box_n <= 0)
+		return false;
+	int btn_x = ftx_queue_box_x + ftx_queue_box_w - FTX_QUEUE_BOX_BTN_W;
+	if (x < btn_x || x >= ftx_queue_box_x + ftx_queue_box_w)
+		return false;
+	int row = (y - ftx_queue_box_y - 2) / ftx_queue_box_row_h;
+	if (row < 0 || row >= ftx_queue_box_n)
+		return false;
+	return ftx_queue_remove_at(row);
+}
+
 int do_console(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
 {
 	char buff[100], *p, *q;
@@ -2271,6 +2306,11 @@ int do_console(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
 		return 1;
 		break;
 	case GDK_BUTTON_PRESS:
+		if (ftx_queue_box_hit_test(a, b)) {
+			f->is_dirty = 1;
+			return 1;
+		}
+		// fall through: not a hit on the queue box's remove button, handle as a normal click
 	case GDK_MOTION_NOTIFY: {
 		// Map the click's y-coordinate to the row that draw_console() actually
 		// painted there. Using the recorded map (rather than recomputing

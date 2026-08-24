@@ -1741,10 +1741,15 @@ int ftx_queue_count(void)
 	return ftx_queue_n;
 }
 
-const char *ftx_queue_callsign_at(int rank)
+/*!
+	Maps a display rank (0 = next to be dequeued) to its physical index in ftx_queue[].
+	Returns -1 if rank is out of range. Shared by ftx_queue_callsign_at() and
+	ftx_queue_remove_at() so both agree on exactly the same ordering.
+*/
+static int ftx_queue_index_at_rank(int rank)
 {
 	if (rank < 0 || rank >= ftx_queue_n)
-		return "";
+		return -1;
 	bool used[FTX_QUEUE_CAP] = { 0 };
 	int best = -1;
 	for (int pick = 0; pick <= rank; pick++) {
@@ -1754,7 +1759,29 @@ const char *ftx_queue_callsign_at(int rank)
 				best = i;
 		used[best] = true;
 	}
-	return ftx_queue[best].callsign;
+	return best;
+}
+
+const char *ftx_queue_callsign_at(int rank)
+{
+	int i = ftx_queue_index_at_rank(rank);
+	return i < 0 ? "" : ftx_queue[i].callsign;
+}
+
+/*!
+	Removes the queued caller at display rank \a rank (0 = next to be dequeued) -- e.g. from
+	clicking that entry's "X" button in the console's queue overlay -- for a targeted
+	cancellation before it's ever acted on. Returns false (no-op) if rank is out of range.
+*/
+bool ftx_queue_remove_at(int rank)
+{
+	int i = ftx_queue_index_at_rank(rank);
+	if (i < 0)
+		return false;
+	for (int j = i + 1; j < ftx_queue_n; j++)
+		ftx_queue[j - 1] = ftx_queue[j];
+	ftx_queue_n--;
+	return true;
 }
 
 void ftx_queue_reset_for_test(void)

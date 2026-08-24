@@ -18,5 +18,8 @@ bool ftx_slot_has_room(int slot_relative_ms, bool is_ft4);
 // without a general-purpose API: rank 0 is the next callsign ftx_queue_dequeue_next() would act on.
 int ftx_queue_count(void);
 const char *ftx_queue_callsign_at(int rank);
+// Removes the queued caller at display rank (0 = next to be dequeued); false if out of range.
+// Used for the console's per-entry "X" (remove) button.
+bool ftx_queue_remove_at(int rank);
 // Exposed (non-static) purely so tests can clear the queue between independent test cases.
 void ftx_queue_reset_for_test(void);
