@@ -1372,15 +1372,19 @@ void ft8_poll(int tx_is_on){
 			tx_off();
 			ftx_repeat = ftx_repeat_save;
 			if (!ftx_repeat) {
-				if (strcmp(field_str("FTX_AUTO"), "OFF")) {
+				bool auto_on = strcmp(field_str("FTX_AUTO"), "OFF") != 0;
+				if (auto_on)
 					call_wipe();
-					// Giving up on this caller (no reply after FTX_REPEAT tries) shouldn't
-					// strand anyone waiting in the queue -- move on, same as a normal
-					// completion or an ESC-aborted QSO. No-op if nothing is queued.
-					ftx_queue_dequeue_next();
-				}
 				ft8_abort(true);
 				ftx_tx_text[0] = 0;
+				// Giving up on this caller (no reply after FTX_REPEAT tries) shouldn't strand
+				// anyone waiting in the queue -- move on, same as a normal completion or an
+				// ESC-aborted QSO. No-op if nothing is queued. Must run *after* ft8_abort()
+				// above: ft8_abort() zeroes ftx_repeat/ftx_tx_text, which would otherwise wipe
+				// out the transmission ftx_queue_dequeue_next() just composed for the next
+				// caller (fields would get populated, but nothing would actually transmit).
+				if (auto_on)
+					ftx_queue_dequeue_next();
 			}
 		}
 		return;
