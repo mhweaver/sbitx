@@ -484,7 +484,7 @@ static int console_row_height = 0;  // pixel height of each drawn row
 // so do_console() can hit-test clicks on each entry's "X" (remove) button. ftx_queue_box_n is
 // 0 whenever the queue was empty at the last draw, which is also what makes the hit test a
 // no-op when there's no overlay on screen to click.
-#define FTX_QUEUE_BOX_BTN_W 16
+#define FTX_QUEUE_BOX_BTN_W 26 // wide enough to be a reliable touch target, not just a mouse target
 static int ftx_queue_box_x = 0, ftx_queue_box_y = 0, ftx_queue_box_w = 0, ftx_queue_box_row_h = 0;
 static int ftx_queue_box_n = 0;
 
@@ -2277,6 +2277,12 @@ int console_line_by_row(uint32_t row, const char **out_text, int *out_len, const
 	draw_console() call, removes that queued caller and returns true. A no-op (returns false)
 	whenever the queue was empty at the last draw, so it doesn't interfere with normal console
 	clicks when there's no overlay on screen.
+
+	The row bound is checked against the *live* ftx_queue_count(), not the cached
+	ftx_queue_box_n from the last draw: a tap can arrive before the redraw from a previous
+	removal has run, and validating against a stale (larger) count let a rank that's already
+	out of range slip through and silently no-op in ftx_queue_remove_at() -- one of the causes
+	behind the remove button occasionally needing 2-3 taps.
 */
 static bool ftx_queue_box_hit_test(int x, int y)
 {
@@ -2286,7 +2292,7 @@ static bool ftx_queue_box_hit_test(int x, int y)
 	if (x < btn_x || x >= ftx_queue_box_x + ftx_queue_box_w)
 		return false;
 	int row = (y - ftx_queue_box_y - 2) / ftx_queue_box_row_h;
-	if (row < 0 || row >= ftx_queue_box_n)
+	if (row < 0 || row >= ftx_queue_count())
 		return false;
 	return ftx_queue_remove_at(row);
 }
@@ -2307,6 +2313,10 @@ int do_console(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
 		break;
 	case GDK_BUTTON_PRESS:
 		if (ftx_queue_box_hit_test(a, b)) {
+			// Clear the selection so the matching GDK_BUTTON_RELEASE (which always fires,
+			// unconditionally, on whatever line was last selected) doesn't act on a stale
+			// line -- otherwise removing a queue entry could also replay a leftover click.
+			console_selected_line = -1;
 			f->is_dirty = 1;
 			return 1;
 		}

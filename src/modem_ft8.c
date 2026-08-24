@@ -1811,18 +1811,17 @@ void ftx_call_or_continue(const char* line, int line_len, const text_span_semant
 		field_set("FTX_RX_PITCH", msg.pitch);
 	set_reply_tx1st(msg.time % 100);
 
-	// The callee is not me, so this is not a continuation of a QSO: clear any stale received
-	// RST (it was for someone else) and start a new QSO, bypassing the queue -- this is such a
-	// rare/defensive case (my callsign showing up somewhere in a message addressed to someone
-	// else) that it isn't worth entangling with the queueing logic below.
+	// The callee is not me: whatever this message is (someone else's exchange, or their own
+	// CQ-response to a third station), it isn't a continuation of a QSO with us, so none of
+	// its RST/report/completion content is actually about us. Discard that content -- but
+	// still let msg.caller flow through the normal qso_in_progress / click-behavior / queue
+	// logic below, the same as clicking any other station: this used to unconditionally
+	// transmit and return here, bypassing the queue entirely, which is exactly the "clicking a
+	// station immediately hijacks/aborts an in-progress QSO, ignoring FTX_CLICK_BEHAVIOR" bug.
 	if (msg.has_callee && strcmp(msg.callee, field_str("MYCALLSIGN"))) {
-		char mygrid[8];
-		strncpy(mygrid, field_str("MYGRID"), sizeof(mygrid));
-		mygrid[4] = 0;
-		field_set("RECV", "");
-		tx_off();
-		ft8_tx_3f(msg.caller, field_str("MYCALLSIGN"), mygrid);
-		return;
+		msg.has_grid = msg.has_rst = msg.has_snr = false;
+		msg.is_73 = msg.is_rr73 = msg.is_rrr = false;
+		field_set("RECV", ""); // clear any stale received RST; it was for someone else
 	}
 
 	const char *current_call = field_str("CALL");
