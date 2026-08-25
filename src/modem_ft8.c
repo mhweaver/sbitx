@@ -1582,12 +1582,16 @@ static void ftx_caller_merge(ftx_pending_caller* rec, const ftx_parsed_message* 
 	bool direct = msg->has_callee && !strcmp(msg->callee, field_str("MYCALLSIGN"));
 	if (direct)
 		rec->engaged = true;
-	// Only record a grid from a directly-addressed message. A bare CQ ("CQ CALLER GRID" has no
-	// callsign in the callee slot) also has a grid-shaped span, but that's their own broadcast
-	// grid, not a reply to a call from us; recording it here would wrongly make ftx_caller_act()
-	// skip straight to "send report" instead of properly initiating with our own grid. If we do
-	// go on to call them, they repeat their grid in their direct reply anyway, so nothing is lost.
-	if (msg->has_grid && direct) {
+	// Record a grid whenever we hear one, even from a bare CQ that isn't addressed to us --
+	// it's still genuinely their grid. (This used to require `direct`, on the theory that if
+	// we call them we'd hear their grid again in their reply -- but per the standard FT8
+	// sequence, the station whose CQ we're answering never repeats their grid; the next
+	// exchange goes straight to a signal report. Gating on `direct` here just discarded a
+	// grid we'd legitimately heard and would never see again, leaving EXCH blank in the log
+	// for most CQ-initiated contacts.) `engaged` (above) is what actually prevents jumping
+	// straight to "send report" for a not-yet-engaged CQ -- see ftx_caller_act()'s
+	// `engaged && has_grid` check -- so relaxing this doesn't reintroduce that bug.
+	if (msg->has_grid) {
 		rec->has_grid = true;
 		strncpy(rec->grid, msg->grid, sizeof(rec->grid) - 1);
 	}
