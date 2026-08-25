@@ -1390,16 +1390,27 @@ void ft8_poll(int tx_is_on){
 			tx_off();
 			ftx_repeat = ftx_repeat_save;
 			if (!ftx_repeat) {
+				// A message ending in " 73" (but not "...RR73") is our own closing 73 --
+				// ft8_tx_3f() sets ftx_repeat=1 ("no repeat for '73'") specifically for it.
+				// That's a deliberate, already-logged (see ftx_caller_act()'s got_rr73
+				// branch) end to the QSO, not a give-up with no reply, so it shouldn't wait
+				// out a grace period -- only the "no reply after FTX_REPEAT tries" case should.
+				// Must be checked *before* ft8_abort(true) below, which clears ftx_tx_text.
+				int tx_len = strlen(ftx_tx_text);
+				bool sent_closing_73 = tx_len >= 3 && !strcmp(ftx_tx_text + tx_len - 3, " 73");
 				ft8_abort(true);
-				ftx_tx_text[0] = 0;
-				// Give them one more full slot to reply before actually discarding their
-				// accumulated details / moving on to the next queued caller (see the check
-				// at the top of this function). No grace period needed in manual (FTX_AUTO
-				// OFF) mode -- nothing here auto-advances either way.
-				if (strcmp(field_str("FTX_AUTO"), "OFF") && !ftx_giveup_pending) {
-					bool is_ft4 = !strcmp(field_str("MODE"), "FT4");
-					ftx_giveup_pending = true;
-					ftx_giveup_deadline_ms = sbitx_millis() + (is_ft4 ? 7500UL : 15000UL);
+				if (strcmp(field_str("FTX_AUTO"), "OFF")) {
+					if (sent_closing_73) {
+						call_wipe();
+						ftx_queue_dequeue_next();
+					} else if (!ftx_giveup_pending) {
+						// Give them one more full slot to reply before actually discarding
+						// their accumulated details / moving on to the next queued caller
+						// (see the check at the top of this function).
+						bool is_ft4 = !strcmp(field_str("MODE"), "FT4");
+						ftx_giveup_pending = true;
+						ftx_giveup_deadline_ms = sbitx_millis() + (is_ft4 ? 7500UL : 15000UL);
+					}
 				}
 			}
 		}
