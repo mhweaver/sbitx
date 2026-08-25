@@ -1997,6 +1997,18 @@ uint32_t write_console_semantic(const char *text, const text_span_semantic *sem,
 	return newline ? console_last_row - 1 : console_last_row;
 }
 
+// Whether `callsign` is currently waiting in the FTx caller queue, so the console can color
+// their lines to match -- reuses the existing public queue accessors rather than reaching into
+// modem_ft8.c's internals.
+static bool ftx_queue_contains_callsign(const char *callsign)
+{
+	int n = ftx_queue_count();
+	for (int i = 0; i < n; i++)
+		if (!strcasecmp(ftx_queue_callsign_at(i), callsign))
+			return true;
+	return false;
+}
+
 void draw_console(cairo_t* gfx, struct field* f)
 {
 	// save then change console font heights when bigfont is enabled
@@ -2093,11 +2105,16 @@ void draw_console(cairo_t* gfx, struct field* f)
 			}
 			buf[wlen] = 0;
 			int sem = line->spans[span].semantic;
-			if (logger_call[0] && (sem == STYLE_CALLER || sem == STYLE_CALLEE || sem == STYLE_RECENT_CALLER)) {
+			if (sem == STYLE_CALLER || sem == STYLE_CALLEE || sem == STYLE_RECENT_CALLER) {
 				// If a callsign in the console starts with the prefix typed into the logger CALL field,
 				// or if it matches it completely, draw with the highlight color.
-				if (!strncasecmp(buf, logger_call, strlen(logger_call)))
+				if (logger_call[0] && !strncasecmp(buf, logger_call, strlen(logger_call)))
 					sem = STYLE_HIGHLIGHT;
+				// Otherwise, if they're currently waiting in the FTx queue, reuse the same
+				// style already used for a message staged for transmission -- same idea
+				// (something pending, not yet acted on), so no new template key is needed.
+				else if (ftx_queue_contains_callsign(buf))
+					sem = STYLE_FT8_QUEUED;
 			}
 			x += draw_text(gfx, f->x + 2 + x, y, buf, sem);
 			//~ printf("   drew span %d col %d len %d style %d end @ %d px: '%s' from '%s'\n",

@@ -1730,6 +1730,10 @@ static ftx_pending_caller* ftx_queue_insert(const ftx_pending_caller* seed, bool
 */
 void ftx_queue_dequeue_next(void)
 {
+	// LOG_INFO (not LOG_DEBUG) so this is visible without changing LOG_LEVEL: prints every time
+	// *anything* asks the queue to advance, so a report of "the last item never got worked" can
+	// be checked against whether this ever ran, and with what queue count, around that time.
+	LOG(LOG_INFO, "   ftx: dequeue_next called, queue count=%d\n", ftx_queue_n);
 	if (ftx_queue_n <= 0)
 		return;
 	int oldest = 0;
@@ -1740,6 +1744,7 @@ void ftx_queue_dequeue_next(void)
 	for (int j = oldest + 1; j < ftx_queue_n; j++)
 		ftx_queue[j - 1] = ftx_queue[j];
 	ftx_queue_n--;
+	LOG(LOG_INFO, "   ftx: dequeue_next acting on '%s', %d left queued\n", next.callsign, ftx_queue_n);
 	ftx_caller_act(&next);
 }
 
