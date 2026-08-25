@@ -2113,8 +2113,17 @@ void draw_console(cairo_t* gfx, struct field* f)
 				// Otherwise, if they're currently waiting in the FTx queue, reuse the same
 				// style already used for a message staged for transmission -- same idea
 				// (something pending, not yet acted on), so no new template key is needed.
-				else if (ftx_queue_contains_callsign(buf))
-					sem = STYLE_FT8_QUEUED;
+				// buf still has the raw span text, which includes the trailing separator
+				// space between fields ("each span ends where the next starts") -- extract
+				// the trimmed callsign the same way the rest of the codebase does before
+				// comparing, or it'll never exactly match the queue's clean callsign.
+				else {
+					char clean_call[24];
+					if (extract_single_semantic(line->text, line->spans[0].length, line->spans[span],
+							clean_call, sizeof(clean_call)) >= 0
+						&& ftx_queue_contains_callsign(clean_call))
+						sem = STYLE_FT8_QUEUED;
+				}
 			}
 			x += draw_text(gfx, f->x + 2 + x, y, buf, sem);
 			//~ printf("   drew span %d col %d len %d style %d end @ %d px: '%s' from '%s'\n",
