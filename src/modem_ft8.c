@@ -54,6 +54,13 @@ static int ftx_pitch = 0;
 static pthread_t ftx_thread;
 // number of repetitions left for the current message, counting down from the user setting
 static int ftx_repeat = 5;
+// Set once the last repeat's audio finishes with no reply heard: rather than discarding the
+// caller's accumulated details (grid, etc.) immediately, we give them one more full slot to
+// reply before actually giving up (see ft8_poll()). Cleared as soon as we act on anyone (a
+// reply arriving cancels the pending give-up the normal way, via ftx_caller_act()).
+static bool ftx_giveup_pending = false;
+static unsigned long ftx_giveup_deadline_ms = 0;
+extern unsigned long sbitx_millis();
 static bool is_cq = false; // is ftx_tx_text a CQ?
 static bool ftx_tx1st = true;
 static bool ftx_cq_alt = false;
@@ -1363,6 +1370,17 @@ void ft8_rx(int32_t *samples, int count) {
 }
 
 void ft8_poll(int tx_is_on){
+	// A give-up from repeat-exhaustion (below) doesn't discard the caller's accumulated
+	// details right away -- it waits one more full slot in case they reply late. Once that
+	// grace period elapses with still nothing heard, actually wipe the fields and move on.
+	// A reply arriving during the grace period cancels this the normal way, via
+	// ftx_caller_act() clearing ftx_giveup_pending.
+	if (ftx_giveup_pending && sbitx_millis() >= ftx_giveup_deadline_ms) {
+		ftx_giveup_pending = false;
+		call_wipe();
+		ftx_queue_dequeue_next();
+	}
+
 	//if we are already transmitting, we continue
 	//until we run out of ft8 sampels
 	if (tx_is_on){
@@ -1372,19 +1390,17 @@ void ft8_poll(int tx_is_on){
 			tx_off();
 			ftx_repeat = ftx_repeat_save;
 			if (!ftx_repeat) {
-				bool auto_on = strcmp(field_str("FTX_AUTO"), "OFF") != 0;
-				if (auto_on)
-					call_wipe();
 				ft8_abort(true);
 				ftx_tx_text[0] = 0;
-				// Giving up on this caller (no reply after FTX_REPEAT tries) shouldn't strand
-				// anyone waiting in the queue -- move on, same as a normal completion or an
-				// ESC-aborted QSO. No-op if nothing is queued. Must run *after* ft8_abort()
-				// above: ft8_abort() zeroes ftx_repeat/ftx_tx_text, which would otherwise wipe
-				// out the transmission ftx_queue_dequeue_next() just composed for the next
-				// caller (fields would get populated, but nothing would actually transmit).
-				if (auto_on)
-					ftx_queue_dequeue_next();
+				// Give them one more full slot to reply before actually discarding their
+				// accumulated details / moving on to the next queued caller (see the check
+				// at the top of this function). No grace period needed in manual (FTX_AUTO
+				// OFF) mode -- nothing here auto-advances either way.
+				if (strcmp(field_str("FTX_AUTO"), "OFF") && !ftx_giveup_pending) {
+					bool is_ft4 = !strcmp(field_str("MODE"), "FT4");
+					ftx_giveup_pending = true;
+					ftx_giveup_deadline_ms = sbitx_millis() + (is_ft4 ? 7500UL : 15000UL);
+				}
 			}
 		}
 		return;
@@ -1599,6 +1615,10 @@ static void ftx_caller_merge(ftx_pending_caller* rec, const ftx_parsed_message* 
 */
 static void ftx_caller_act(ftx_pending_caller* rec)
 {
+	// Acting on anyone -- whether it's the caller we were about to give up on (a late reply)
+	// or someone else entirely -- supersedes any pending give-up from ft8_poll()'s grace
+	// period; there's nothing left to discard-after-a-delay once we've moved on ourselves.
+	ftx_giveup_pending = false;
 	tx_off();
 	field_set("CALL", rec->callsign);
 	if (rec->has_grid)
