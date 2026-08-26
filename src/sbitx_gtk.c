@@ -6855,6 +6855,10 @@ int do_text(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
 		}
 		else if ((a == '\n' || a == MIN_KEY_ENTER) && mode_ftx && f->value[0] != COMMAND_ESCAPE)
 		{
+			// A CQ means "I'm not targeting anyone specific" -- see do_macro()'s CQ button
+			// handling for why this needs to clear CALL/EXCH/etc first.
+			if (!strncmp(f->value, "CQ ", 3))
+				call_wipe();
 			ft8_tx(f->value, field_int("TX_PITCH"));
 			f->value[0] = 0;
 		}
@@ -8378,6 +8382,12 @@ int do_macro(struct field *f, cairo_t *gfx, int event, int a, int b, int c) {
       tx_on(TX_SOFT);
     }
     if (!strncmp(mode, "FT", 2) && strlen(buff)) {
+      // A CQ means "I'm not targeting anyone specific" -- clear CALL/EXCH/etc first so a
+      // stale value left over from an earlier contact doesn't make ftx_call_or_continue()
+      // think a genuine reply to this CQ is interrupting an (actually long-gone) QSO and
+      // queue it instead of answering, while the radio just keeps repeating the CQ.
+      if (!strncmp(buff, "CQ ", 3))
+        call_wipe();
       ft8_tx(buff, atoi(get_field("#tx_pitch")->value));
       set_field("#text_in", "");
     } else if (strlen(buff)) {
