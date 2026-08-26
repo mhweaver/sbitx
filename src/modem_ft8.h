@@ -13,6 +13,9 @@ void ftx_call_or_continue(const char* line, int line_len, const text_span_semant
 // Exposed (non-static) purely so tests can call this pure timing check deterministically,
 // without needing to fake the wallclock.
 bool ftx_slot_has_room(int slot_relative_ms, bool is_ft4);
+// Exposed (non-static) purely so tests can verify the TX slot-parity flag is only updated when
+// we're actually about to transmit, not for every parsed message (including queued ones).
+bool ftx_tx1st_for_test(void);
 
 // If anything is queued, pops the front entry and acts on it (transmits/resumes as
 // appropriate). Normally happens automatically once a QSO completes (got 73); also called

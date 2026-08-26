@@ -1469,6 +1469,14 @@ static void set_reply_tx1st(int msg_second)
 	LOG(LOG_DEBUG, "msg_second %d slot_in_minute %d odd? %d reply tx1st? %d\n", msg_second, slot_in_minute, slot_in_minute % 2, ftx_tx1st);
 }
 
+// Exposed (non-static) purely so tests can verify set_reply_tx1st() only gets (re-)applied
+// when we're actually about to transmit, not for every parsed message (including ones that
+// end up merely queued).
+bool ftx_tx1st_for_test(void)
+{
+	return ftx_tx1st;
+}
+
 /*!
 	start a QSO: call the callsign specified by the "CALL" field,
 	based on a previous selected message that occurred at time \a sel_time.
@@ -1858,7 +1866,6 @@ void ftx_call_or_continue(const char* line, int line_len, const text_span_semant
 
 	if (msg.has_pitch)
 		field_set("FTX_RX_PITCH", msg.pitch);
-	set_reply_tx1st(msg.time % 100);
 
 	// The callee is not me: whatever this message is (someone else's exchange, or their own
 	// CQ-response to a third station), it isn't a continuation of a QSO with us, so none of
@@ -1917,6 +1924,14 @@ void ftx_call_or_continue(const char* line, int line_len, const text_span_semant
 		}
 		// REPLACE (or SWITCH, having just suspended the old one): fall through and act on the new caller now.
 	}
+
+	// Only touch the global TX slot-parity state when we're actually about to transmit to
+	// msg.caller -- not for every parsed message. This used to run unconditionally at the top
+	// of this function, so even a message that ended up merely queued (never acted on) would
+	// overwrite ftx_tx1st, corrupting the slot timing for whoever we were actively mid-QSO
+	// with -- e.g. clicking a few CQs to enqueue them while calling someone else could flip
+	// our next transmission into the wrong (adjacent) slot instead of the correct alternating one.
+	set_reply_tx1st(msg.time % 100);
 
 	ftx_pending_caller rec = ftx_queue_take(msg.caller);
 	ftx_caller_merge(&rec, &msg);
