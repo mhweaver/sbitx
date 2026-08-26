@@ -1058,6 +1058,14 @@ static int sbitx_ft8_decode(float *signal, int num_samples)
 		// 	time_sec_i, highest_priority, highest_priority_row, ftx_tx_text[0]);
 		if (ftx_tx_text[0]) {
 			LOG(LOG_DEBUG, "skipping auto-responder because of queued message '%s'\n", ftx_tx_text);
+		} else if (!field_str("CALL")[0] && ftx_queue_count() > 0) {
+			// Idle (no active QSO), but someone's already waiting in the FTx queue -- work
+			// through them before jumping on a new CQ, even a higher-priority one. A new CQ
+			// heard this cycle isn't lost: it's still sitting in the console, so once the
+			// queue's caught up, a later cycle can pick it up as a fresh candidate.
+			LOG(LOG_INFO, "auto-responder: %d already queued, resuming instead of a new CQ\n",
+				ftx_queue_count());
+			ftx_queue_dequeue_next();
 		} else {
 			const char *cand_text;
 			int cand_len;
