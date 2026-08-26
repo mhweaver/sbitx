@@ -1889,7 +1889,15 @@ void ftx_call_or_continue(const char* line, int line_len, const text_span_semant
 	}
 
 	const char *current_call = field_str("CALL");
-	bool qso_in_progress = current_call[0] && strcmp(current_call, msg.caller);
+	// A message only counts as a genuine continuation of our active QSO if it's actually
+	// addressed to us -- a bare CQ, or a message they sent to some third station, isn't
+	// evidence of them replying to us, even if the caller happens to match. Without this, the
+	// station we're mid-attempt with (including one we've given up on and are just waiting
+	// out the grace period for) sending an unrelated fresh CQ looked identical to a reply,
+	// silently resurrecting a stale attempt instead of properly timing out and letting the
+	// queue advance.
+	bool direct_to_us = msg.has_callee && !strcmp(msg.callee, field_str("MYCALLSIGN"));
+	bool qso_in_progress = current_call[0] && (strcmp(current_call, msg.caller) || !direct_to_us);
 	// LOG_INFO (not LOG_DEBUG) so this prints alongside the "<<"/"->"/">>" trace lines already
 	// on stderr: this is the exact decision point that determines whether a click queues or
 	// hijacks the active QSO.
