@@ -6855,11 +6855,12 @@ int do_text(struct field *f, cairo_t *gfx, int event, int a, int b, int c)
 		}
 		else if ((a == '\n' || a == MIN_KEY_ENTER) && mode_ftx && f->value[0] != COMMAND_ESCAPE)
 		{
-			// A CQ means "I'm not targeting anyone specific" -- see do_macro()'s CQ button
-			// handling for why this needs to clear CALL/EXCH/etc first.
+			// A CQ is a queueable action of its own (see ftx_request_cq()): sent immediately if
+			// idle, otherwise takes its place in the FTx queue instead of interrupting/hijacking.
 			if (!strncmp(f->value, "CQ ", 3))
-				call_wipe();
-			ft8_tx(f->value, field_int("TX_PITCH"));
+				ftx_request_cq(f->value);
+			else
+				ft8_tx(f->value, field_int("TX_PITCH"));
 			f->value[0] = 0;
 		}
 		else if (a >= ' ' && a <= 127 && strlen(f->value) < f->max - 1)
@@ -8382,13 +8383,12 @@ int do_macro(struct field *f, cairo_t *gfx, int event, int a, int b, int c) {
       tx_on(TX_SOFT);
     }
     if (!strncmp(mode, "FT", 2) && strlen(buff)) {
-      // A CQ means "I'm not targeting anyone specific" -- clear CALL/EXCH/etc first so a
-      // stale value left over from an earlier contact doesn't make ftx_call_or_continue()
-      // think a genuine reply to this CQ is interrupting an (actually long-gone) QSO and
-      // queue it instead of answering, while the radio just keeps repeating the CQ.
+      // A CQ is a queueable action of its own (see ftx_request_cq()): sent immediately if idle,
+      // otherwise takes its place in the FTx queue instead of interrupting/hijacking.
       if (!strncmp(buff, "CQ ", 3))
-        call_wipe();
-      ft8_tx(buff, atoi(get_field("#tx_pitch")->value));
+        ftx_request_cq(buff);
+      else
+        ft8_tx(buff, atoi(get_field("#tx_pitch")->value));
       set_field("#text_in", "");
     } else if (strlen(buff)) {
       if ((mode_id(mode) == MODE_CW) || (mode_id(mode) == MODE_CWR)) {
@@ -9571,10 +9571,9 @@ static gboolean on_key_press(GtkWidget *widget, GdkEventKey *event, gpointer use
 		// TODO we could do a 2-stage esc: call it with false the first time, true the second
 		modem_abort(true);
 		tx_off();
-		call_wipe();
 		// Abandoning this QSO shouldn't strand anyone waiting in the FTx queue -- pick up the
 		// next one, same as when a QSO completes normally. A no-op if nothing is queued.
-		ftx_queue_dequeue_next();
+		ftx_end_qso();
 		break;
 	case MIN_KEY_UP:
 		if (f_focus == NULL && f_hover > active_layout)
@@ -11665,20 +11664,16 @@ void do_control_action(char *cmd)
 	}
 	else if (!strcmp(request, "WIPE"))
 	{
-		call_wipe();
 		// Don't strand anyone waiting in the FTx queue; no-op if nothing is queued.
-		ftx_queue_dequeue_next();
+		ftx_end_qso();
 	}
 	else if (!strcmp(request, "ESC"))
 	{
 		modem_abort(true);
 		tx_off();
-		call_wipe();
 		field_set("TEXT", "");
-		modem_abort(true);
-		tx_off();
 		// Don't strand anyone waiting in the FTx queue; no-op if nothing is queued.
-		ftx_queue_dequeue_next();
+		ftx_end_qso();
 	}
 	else if (!strcmp(request, "TX"))
 	{

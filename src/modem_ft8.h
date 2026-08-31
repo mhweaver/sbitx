@@ -16,6 +16,8 @@ bool ftx_slot_has_room(int slot_relative_ms, bool is_ft4);
 // Exposed (non-static) purely so tests can verify the TX slot-parity flag is only updated when
 // we're actually about to transmit, not for every parsed message (including queued ones).
 bool ftx_tx1st_for_test(void);
+// Exposed (non-static) purely so tests can inspect the actual outgoing message text/content.
+const char *ftx_tx_text_for_test(void);
 
 // If anything is queued, pops the front entry and acts on it (transmits/resumes as
 // appropriate). Normally happens automatically once a QSO completes (got 73); also called
@@ -32,3 +34,25 @@ bool ftx_queue_remove_at(int rank);
 // Empties the whole queue without acting on any of it -- used when a band or mode change makes
 // everything queued unreachable, and by tests to isolate independent test cases.
 void ftx_queue_clear(void);
+
+// Single entry point for every terminal transition of the active QSO (deliberate abort, they
+// or we sent a closing 73, or we gave up after no reply): clears the CALL/EXCH/etc UI fields
+// and advances the queue. Replaces the hand-rolled call_wipe()+ftx_queue_dequeue_next() pairs
+// that used to be duplicated at every ESC/WIPE call site.
+void ftx_end_qso(void);
+
+// The CQRESP auto-responder's verdict for the current decode cycle, given the highest CQ
+// candidate priority found this cycle (negative if none). Exposed (non-static) so tests can
+// drive this decision directly without linking the decode loop.
+typedef enum {
+	FTX_CQRESP_IDLE,             // FTX_AUTO != CQRESP, or nothing qualified this cycle
+	FTX_CQRESP_BUSY,             // already have an outbound message queued/in flight
+	FTX_CQRESP_RESUME_QUEUE,     // idle, but someone's already waiting in the FTx queue
+	FTX_CQRESP_ANSWER_CANDIDATE, // answer the highest-priority CQ candidate found this cycle
+} ftx_cqresp_verdict;
+ftx_cqresp_verdict ftx_cqresp_decide(int priority);
+
+// Single entry point for "the operator wants to send this CQ now" (the macro CQ button, or
+// manually typing a CQ into the text-entry field): transmits immediately if idle, otherwise
+// takes its place in the same FTx queue as waiting callers instead of interrupting/hijacking.
+void ftx_request_cq(const char *cq_text);

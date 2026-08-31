@@ -173,9 +173,8 @@ void macro_get_var(char *var, char *s){
 		strcpy(s, field_str("NR"));
 	}
 	else if (!strcmp(var, "WIPE")) {
-		call_wipe();
 		// Don't strand anyone waiting in the FTx queue; no-op if nothing is queued.
-		ftx_queue_dequeue_next();
+		ftx_end_qso();
 	}
 	else if (!strcmp(var, "SAVE")){
 		enter_qso();

@@ -8,9 +8,7 @@
 #include <ctype.h>
 #include <arpa/inet.h>
 #include <time.h>
-#include <math.h>
 #include <complex.h>
-#include <fftw3.h>
 #include <pthread.h>
 #include <unistd.h>
 #include "ftx_rules.h"
@@ -23,7 +21,6 @@
 #define LOG_LEVEL LOG_INFO
 
 #include "ft8_lib/common/common.h"
-#include "ft8_lib/common/wave.h"
 #include "ft8_lib/ft8/debug.h"
 #include "ft8_lib/ft8/decode.h"
 #include "ft8_lib/ft8/encode.h"
@@ -49,7 +46,6 @@ static int ftx_rx_buff_index = 0;
 static int ftx_tx_buff_index = 0;
 static int ftx_tx_nsamples = 0;
 static int ftx_do_decode = 0;
-static int ftx_do_tx = 0;
 static int ftx_pitch = 0;
 static pthread_t ftx_thread;
 // number of repetitions left for the current message, counting down from the user setting
@@ -61,6 +57,9 @@ static int ftx_repeat = 5;
 static bool ftx_giveup_pending = false;
 static unsigned long ftx_giveup_deadline_ms = 0;
 extern unsigned long sbitx_millis();
+// Whether ftx_tx_text is a deliberate closing "73" (which never repeats), set unconditionally
+// (true or false) by ft8_tx()/ft8_tx_3f() on every call -- the single place this is decided
+static bool ftx_tx_is_closing = false;
 static bool is_cq = false; // is ftx_tx_text a CQ?
 static bool ftx_tx1st = true;
 static bool ftx_cq_alt = false;
@@ -76,12 +75,18 @@ static bool rules_inited = false;
 // slots are actually usable) is #defined in modem_ft8.h so sbitx_gtk.c's field definition can
 // share it.
 
-// Everything about a contact that matters for resuming it and for the eventual log entry.
+// Everything about a contact that matters for resuming it and for the eventual log entry. Also
+// doubles as a queue item for a plain outgoing CQ (is_cq_item=true): sending a CQ is just
+// another action that can wait its turn in the same queue as a waiting caller, subject to the
+// same priority/eviction treatment, rather than a special case of its own.
 typedef struct {
+	bool is_cq_item;                // true: this item is a queued CQ, not a caller -- callsign/
+	                                 // grid/etc are unused, only cq_text/priority/seq matter.
+	char cq_text[64];                // resolved CQ text, already macro-expanded (e.g. "CQ SOTA W1AW EM12")
 	char callsign[16];
 	bool engaged;                   // a direct two-way link exists: they've addressed *me* by name at some point,
-	                                 // or I've already transmitted to them. Gates whether a known grid means
-	                                 // "they replied to my call" (send report) vs. "that's their own CQ" (send my grid).
+	                                // or I've already transmitted to them. Gates whether a known grid means
+	                                // "they replied to my call" (send report) vs. "that's their own CQ" (send my grid).
 	char grid[8];  bool has_grid;   // their grid (~ EXCH) -- only recorded from a directly-addressed message
 	char sent[8];  bool has_sent;   // report we'd send them, from our SNR measurement of them (~ SENT)
 	char recv[8];  bool has_recv;   // report they've told us about our signal (~ RECV)
@@ -96,7 +101,6 @@ static ftx_pending_caller ftx_queue[FTX_QUEUE_CAP];
 static int ftx_queue_n = 0;
 static long ftx_queue_back_seq = 0;   // next seq for a normal (back-of-queue) insert, increases
 static long ftx_queue_front_seq = -1; // next seq for a SWITCH-suspend (front-of-queue) insert, decreases (LIFO)
-void ftx_queue_dequeue_next(void);
 
 // Everything ftx_call_or_continue() needs out of a single decoded/clicked line.
 typedef struct {
@@ -109,6 +113,23 @@ typedef struct {
 	bool is_rr73, is_rrr, is_73, is_rrst;
 	int time;
 } ftx_parsed_message;
+
+// FTx automatic-behavior mode
+// FTX_AUTO's three real setting values, named explicitly instead of raw strcmp("FTX_AUTO", ...)
+// checks scattered wherever a decision needs to know the mode: OFF (manual: populate fields,
+// never transmit), ANS (auto-answer direct calls, but never chase a new CQ on our own), and
+// CQRESP (also chase new CQs when idle). See sbitx_gtk.c for the field definition.
+typedef enum { FTX_AUTO_OFF, FTX_AUTO_ANS, FTX_AUTO_CQRESP } ftx_auto_mode;
+
+static ftx_auto_mode ftx_current_auto_mode(void)
+{
+	const char *s = field_str("FTX_AUTO");
+	if (!strcmp(s, "ANS"))
+		return FTX_AUTO_ANS;
+	if (!strcmp(s, "CQRESP"))
+		return FTX_AUTO_CQRESP;
+	return FTX_AUTO_OFF;
+}
 
 // --- FTx TX slot timing ---
 // FT8/FT4 message duration is fixed by the protocol (not by content), so whether a message
@@ -314,7 +335,7 @@ int tokncpy(char *dst, const char *src, size_t dsize){
 /// The pulse is theoretically infinitely long, however, here it's truncated at 3 times the symbol length.
 /// This means the pulse array has to have space for 3*n_spsym elements.
 /// @param[in] n_spsym Number of samples per symbol
-/// @param[in] b Shape parameter (values defined for FT8/FT4)
+/// @param[in] symbol_bt Shape parameter (values defined for FT8/FT4)
 /// @param[out] pulse Output array of pulse samples
 ///
 static void gfsk_pulse(int n_spsym, float symbol_bt, float* pulse)
@@ -480,28 +501,6 @@ static float hann_i(int i, int N)
     return x * x;
 }
 
-static float hamming_i(int i, int N)
-{
-    const float a0 = (float)25 / 46;
-    const float a1 = 1 - a0;
-
-    float x1 = cosf(2 * (float)M_PI * i / N);
-    return a0 - a1 * x1;
-}
-
-static float blackman_i(int i, int N)
-{
-    const float alpha = 0.16f; // or 2860/18608
-    const float a0 = (1 - alpha) / 2;
-    const float a1 = 1.0f / 2;
-    const float a2 = alpha / 2;
-
-    float x1 = cosf(2 * (float)M_PI * i / N);
-    float x2 = 2 * x1 * x1 - 1; // Use double angle formula
-
-    return a0 - a1 * x1 + a2 * x2;
-}
-
 void waterfall_init(ftx_waterfall_t* me, int max_blocks, int num_bins, int time_osr, int freq_osr)
 {
     size_t mag_size = max_blocks * time_osr * freq_osr * num_bins * sizeof(me->mag[0]);
@@ -564,20 +563,13 @@ static void monitor_init(monitor_t* me, const monitor_config_t* cfg)
     me->window = (float *)malloc(me->nfft * sizeof(me->window[0]));
     for (int i = 0; i < me->nfft; ++i)
     {
-        // window[i] = 1;
         me->window[i] = hann_i(i, me->nfft);
-        // me->window[i] = blackman_i(i, me->nfft);
-        // me->window[i] = hamming_i(i, me->nfft);
-        // me->window[i] = (i < len_window) ? hann_i(i, len_window) : 0;
     }
     me->last_frame = (float *)malloc(me->nfft * sizeof(me->last_frame[0]));
 
     size_t fft_work_size;
     kiss_fftr_alloc(me->nfft, 0, 0, &fft_work_size);
 
-    //LOG(LOG_INFO, "Block size = %d\n", me->block_size);
-    //LOG(LOG_INFO, "Subblock size = %d\n", me->subblock_size);
-    //LOG(LOG_INFO, "N_FFT = %d\n", me->nfft);
     LOG(LOG_DEBUG, "FFT work area = %zu\n", fft_work_size);
 
     me->fft_work = malloc(fft_work_size);
@@ -668,13 +660,25 @@ static int message_callsign_count(const ftx_message_offsets_t *spans)
 	return ret;
 }
 
-static int message_last_span_offset(const ftx_message_offsets_t *spans, ftx_field_t type)
+static bool ftx_qso_active(void); // defined near ftx_caller_merge(), used here too
+
+// The CQRESP auto-responder's verdict for the current decode cycle: whether/how to react to
+// the highest-priority CQ candidate found (if any). Kept as a pure function of \a priority plus
+// module state, separate from sbitx_ft8_decode()'s decode loop (which needs real console/decode
+// state -- row lookup, ftx_already_called[] bookkeeping -- that this function must not touch),
+// so it's directly testable without linking the decode loop. (ftx_cqresp_verdict is declared in
+// modem_ft8.h since tests need the enum too.)
+ftx_cqresp_verdict ftx_cqresp_decide(int priority)
 {
-	int ret = -1;
-	for (int i = 0; i < FTX_MAX_MESSAGE_FIELDS; ++i)
-		if (spans->types[i] == type)
-			ret = spans->offsets[i];
-	return ret;
+	if (ftx_current_auto_mode() != FTX_AUTO_CQRESP)
+		return FTX_CQRESP_IDLE;
+	if (priority < 0)
+		return FTX_CQRESP_IDLE;
+	if (ftx_tx_text[0])
+		return FTX_CQRESP_BUSY;
+	if (!ftx_qso_active() && ftx_queue_count() > 0)
+		return FTX_CQRESP_RESUME_QUEUE;
+	return FTX_CQRESP_ANSWER_CANDIDATE;
 }
 
 static int sbitx_ft8_decode(float *signal, int num_samples)
@@ -716,7 +720,6 @@ static int sbitx_ft8_decode(float *signal, int num_samples)
 	strncpy(mygrid, field_str("MYGRID"), 8);
 	mygrid[4] = 0; // use only the first 4 letters of the grid
 	double mylat, mylon;
-	bool myloc_ok = !locator2longlat(&mylon, &mylat, mygrid);
 
     monitor_init(&mon, &mon_cfg);
 
@@ -1053,20 +1056,20 @@ static int sbitx_ft8_decode(float *signal, int num_samples)
 
 	// If we are in autorespond mode and in idle state (i.e. no message planned to transmit),
 	// try to answer the CQ message on the highest_priority_row in the console, if found.
-	if (highest_priority_row > 0 && highest_priority >= 0 && !strcmp(field_str("FTX_AUTO"), "CQRESP")) {
-		// LOG(LOG_DEBUG, "considering auto-respond @ time %d: highest priority was %d from row %d; existing tx msg? %d\n",
-		// 	time_sec_i, highest_priority, highest_priority_row, ftx_tx_text[0]);
-		if (ftx_tx_text[0]) {
+	switch (ftx_cqresp_decide(highest_priority)) {
+		case FTX_CQRESP_IDLE:
+			break;
+		case FTX_CQRESP_BUSY:
 			LOG(LOG_DEBUG, "skipping auto-responder because of queued message '%s'\n", ftx_tx_text);
-		} else if (!field_str("CALL")[0] && ftx_queue_count() > 0) {
+			break;
+		case FTX_CQRESP_RESUME_QUEUE:
 			// Idle (no active QSO), but someone's already waiting in the FTx queue -- work
-			// through them before jumping on a new CQ, even a higher-priority one. A new CQ
-			// heard this cycle isn't lost: it's still sitting in the console, so once the
-			// queue's caught up, a later cycle can pick it up as a fresh candidate.
+			// through them before jumping on a new CQ, even a higher-priority one.
 			LOG(LOG_INFO, "auto-responder: %d already queued, resuming instead of a new CQ\n",
 				ftx_queue_count());
 			ftx_queue_dequeue_next();
-		} else {
+			break;
+		case FTX_CQRESP_ANSWER_CANDIDATE: {
 			const char *cand_text;
 			int cand_len;
 			const text_span_semantic *cand_spans;
@@ -1085,6 +1088,7 @@ static int sbitx_ft8_decode(float *signal, int num_samples)
 					sizeof(ftx_already_called[0]) - 1);
 				ftx_already_called_n++;
 			}
+			break;
 		}
 	}
 
@@ -1147,7 +1151,6 @@ static bool ftx_would_send() {
 	is_cq = !strncmp(ftx_tx_text, "CQ ", 3);
 	bool is_ft4 = !strcmp(field_str("MODE"), "FT4");
 	const char *ftx_cq = field_str("FTX_CQ");
-	int slot_time = 0;
 
 	ftx_pitch = field_int("TX_PITCH");
 
@@ -1280,10 +1283,8 @@ void ft8_tx(char *message, int freq){
 		write_console(STYLE_FT8_QUEUED, buf);
 
 	int msg_length = strlen(message);
-	if (msg_length > 3 && !strcmp(message + msg_length - 3, " 73"))
-		ftx_repeat = 1; // no repeat for '73'
-	else
-		ftx_repeat = field_int("FTX_REPEAT");
+	ftx_tx_is_closing = msg_length > 3 && !strcmp(message + msg_length - 3, " 73");
+	ftx_repeat = ftx_tx_is_closing ? 1 : field_int("FTX_REPEAT"); // no repeat for '73'
 
 	LOG(LOG_INFO, "-> %d.%c rpt %d %s",
 		message_type, message_type ? ' ' : '0' + ftx_message_get_n3(&ftx_tx_msg), ftx_repeat, buf);
@@ -1313,10 +1314,8 @@ void ft8_tx_3f(const char* call_to, const char* call_de, const char* extra) {
 	write_console(STYLE_FT8_QUEUED, buf);
 
 	const char *str_73 = strstr(extra, "73");
-	if (str_73 && str_73 < extra + 2) // extra could be ' 73' or '73' but not 'RR73'
-		ftx_repeat = 1; // no repeat for '73'
-	else
-		ftx_repeat = field_int("FTX_REPEAT");
+	ftx_tx_is_closing = str_73 && str_73 < extra + 2; // extra could be ' 73' or '73' but not 'RR73'
+	ftx_repeat = ftx_tx_is_closing ? 1 : field_int("FTX_REPEAT"); // no repeat for '73'
 
 	LOG(LOG_INFO, "-> %d.%c rpt %d '%s' '%s' '%s'\n",
 		message_type, message_type ? ' ' : '0' + ftx_message_get_n3(&ftx_tx_msg), ftx_repeat, call_to, call_de, extra);
@@ -1377,6 +1376,20 @@ void ft8_rx(int32_t *samples, int count) {
 	}
 }
 
+/*!
+	Single entry point for every terminal transition of the active QSO: clears the CALL/EXCH/
+	etc. UI fields and immediately advances the queue to whoever's waiting next (a no-op if
+	nothing's queued). \a reason is purely informational for now (logging/future use) -- every
+	terminal transition does exactly the same call_wipe()+dequeue today; callers keep their own
+	modem_abort()/tx_off() calls, since those aren't uniform across every call site (e.g. WIPE
+	doesn't abort an in-flight transmission the way ESC does).
+*/
+void ftx_end_qso(void)
+{
+	call_wipe();
+	ftx_queue_dequeue_next();
+}
+
 void ft8_poll(int tx_is_on){
 	// A give-up from repeat-exhaustion (below) doesn't discard the caller's accumulated
 	// details right away -- it waits one more full slot in case they reply late. Once that
@@ -1385,8 +1398,7 @@ void ft8_poll(int tx_is_on){
 	// ftx_caller_act() clearing ftx_giveup_pending.
 	if (ftx_giveup_pending && sbitx_millis() >= ftx_giveup_deadline_ms) {
 		ftx_giveup_pending = false;
-		call_wipe();
-		ftx_queue_dequeue_next();
+		ftx_end_qso();
 	}
 
 	//if we are already transmitting, we continue
@@ -1398,19 +1410,15 @@ void ft8_poll(int tx_is_on){
 			tx_off();
 			ftx_repeat = ftx_repeat_save;
 			if (!ftx_repeat) {
-				// A message ending in " 73" (but not "...RR73") is our own closing 73 --
-				// ft8_tx_3f() sets ftx_repeat=1 ("no repeat for '73'") specifically for it.
-				// That's a deliberate, already-logged (see ftx_caller_act()'s got_rr73
-				// branch) end to the QSO, not a give-up with no reply, so it shouldn't wait
-				// out a grace period -- only the "no reply after FTX_REPEAT tries" case should.
-				// Must be checked *before* ft8_abort(true) below, which clears ftx_tx_text.
-				int tx_len = strlen(ftx_tx_text);
-				bool sent_closing_73 = tx_len >= 3 && !strcmp(ftx_tx_text + tx_len - 3, " 73");
+				// ftx_tx_is_closing (set by ft8_tx()/ft8_tx_3f(), never re-derived here) is
+				// true for our own closing "73" -- a deliberate, already-logged (see
+				// ftx_caller_act()'s got_rr73 branch) end to the QSO, not a give-up with no
+				// reply, so it shouldn't wait out a grace period -- only the "no reply after
+				// FTX_REPEAT tries" case should.
 				ft8_abort(true);
-				if (strcmp(field_str("FTX_AUTO"), "OFF")) {
-					if (sent_closing_73) {
-						call_wipe();
-						ftx_queue_dequeue_next();
+				if (ftx_current_auto_mode() != FTX_AUTO_OFF) {
+					if (ftx_tx_is_closing) {
+						ftx_end_qso();
 					} else if (!ftx_giveup_pending) {
 						// Give them one more full slot to reply before actually discarding
 						// their accumulated details / moving on to the next queued caller
@@ -1483,6 +1491,13 @@ static void set_reply_tx1st(int msg_second)
 bool ftx_tx1st_for_test(void)
 {
 	return ftx_tx1st;
+}
+
+// Exposed (non-static) purely so tests can inspect the actual outgoing message text/content,
+// not just proxy fields like CALL/EXCH.
+const char *ftx_tx_text_for_test(void)
+{
+	return ftx_tx_text;
 }
 
 /*!
@@ -1598,6 +1613,33 @@ static bool ftx_parse_message(const char* line, int line_len, const text_span_se
 	return true;
 }
 
+// True if \a msg is actually addressed to us (its callee, if any, is our callsign). A bare CQ,
+// or a message addressed to some third station, is not "to me" even if we recognize the caller.
+static bool ftx_addressed_to_me(const ftx_parsed_message* msg)
+{
+	return msg->has_callee && !strcmp(msg->callee, field_str("MYCALLSIGN"));
+}
+
+// True if a QSO is currently active (the CALL field is populated), regardless of who it's with.
+static bool ftx_qso_active(void)
+{
+	return field_str("CALL")[0] != 0;
+}
+
+/*!
+	True if \a msg counts as a genuine continuation of whatever QSO is currently active -- i.e.
+	it's actually addressed to us AND from the caller we're already working. A bare CQ, or a
+	message they sent to some third station, isn't evidence of them replying to us, even if the
+	caller happens to match: without this, the station we're mid-attempt with (including one
+	we've given up on and are just waiting out the grace period for) sending an unrelated fresh
+	CQ looked identical to a reply, silently resurrecting a stale attempt instead of properly
+	timing out and letting the queue advance.
+*/
+static bool ftx_message_continues_active_qso(const ftx_parsed_message* msg)
+{
+	return ftx_qso_active() && !strcmp(field_str("CALL"), msg->caller) && ftx_addressed_to_me(msg);
+}
+
 /*!
 	Folds one parsed message \a msg into a caller's accumulated record \a rec. Used identically
 	whether \a rec lives in the queue (caller stays queued) or is a fresh/resumed record about to
@@ -1606,7 +1648,7 @@ static bool ftx_parse_message(const char* line, int line_len, const text_span_se
 static void ftx_caller_merge(ftx_pending_caller* rec, const ftx_parsed_message* msg)
 {
 	strncpy(rec->callsign, msg->caller, sizeof(rec->callsign) - 1);
-	bool direct = msg->has_callee && !strcmp(msg->callee, field_str("MYCALLSIGN"));
+	const bool direct = ftx_addressed_to_me(msg);
 	if (direct)
 		rec->engaged = true;
 	// Record a grid whenever we hear one, even from a bare CQ that isn't addressed to us --
@@ -1637,20 +1679,86 @@ static void ftx_caller_merge(ftx_pending_caller* rec, const ftx_parsed_message* 
 		rec->got_73 = true;
 }
 
-/*!
-	Given an accumulated record \a rec (freshly merged or resumed from the queue), decide what to
-	transmit/log next, in the same precedence order the old single-message code used, but driven
-	by everything we know about this caller so far instead of just the latest message's flags.
-	This is what lets us jump straight to sending a report once we already know their grid, or
-	complete and log immediately if their queued messages already reached RR73/73.
-*/
-static void ftx_caller_act(ftx_pending_caller* rec)
+// The caller's QSO progression, classified from whatever's accumulated on \a rec so far. This
+// is a *derived* classification, not stored state: the underlying flags aren't mutually
+// exclusive (e.g. a record can have has_grid=true AND got_73=true at once -- the grid's still
+// needed for the log line after the QSO ends), so this must be recomputed each time, in the
+// same precedence order the old single-message code used.
+typedef enum {
+	FTX_STAGE_NEW,             // not yet engaged (bare CQ, or nothing heard back yet)
+	FTX_STAGE_GRID_KNOWN,      // engaged, know their grid, nothing received back yet
+	FTX_STAGE_REPORT_RECEIVED, // they've sent a plain signal report of us
+	FTX_STAGE_ROGER_RECEIVED,  // their report was itself a roger-report (e.g. "R-05")
+	FTX_STAGE_RR73_RECEIVED,   // they've sent RR73/RRR
+	FTX_STAGE_73_RECEIVED,     // they've sent their closing 73
+} ftx_qso_stage;
+
+static ftx_qso_stage ftx_caller_stage(const ftx_pending_caller* rec)
 {
-	// Acting on anyone -- whether it's the caller we were about to give up on (a late reply)
-	// or someone else entirely -- supersedes any pending give-up from ft8_poll()'s grace
-	// period; there's nothing left to discard-after-a-delay once we've moved on ourselves.
-	ftx_giveup_pending = false;
-	tx_off();
+	if (rec->got_73)
+		return FTX_STAGE_73_RECEIVED;
+	if (rec->got_rr73)
+		return FTX_STAGE_RR73_RECEIVED;
+	if (rec->has_recv && rec->recv_is_roger)
+		return FTX_STAGE_ROGER_RECEIVED;
+	if (rec->has_recv)
+		return FTX_STAGE_REPORT_RECEIVED;
+	if (rec->engaged && rec->has_grid)
+		return FTX_STAGE_GRID_KNOWN;
+	return FTX_STAGE_NEW;
+}
+
+static void ftx_stage_finish_qso(void)
+{
+	LOG(LOG_DEBUG, "received 73\n");
+	enter_qso();
+	ft8_abort(true);
+	ftx_end_qso();
+}
+
+static void ftx_stage_send_closing_73(ftx_pending_caller* rec, const char* mycall)
+{
+	LOG(LOG_DEBUG, "received RR73, send 73\n");
+	ft8_tx_3f(rec->callsign, mycall, "73"); // sets ftx_repeat=1/ftx_tx_is_closing itself
+	enter_qso();
+	// don't call_wipe() yet: wait for the 73 to finish sending
+}
+
+static void ftx_stage_send_rr73(ftx_pending_caller* rec, const char* mycall)
+{
+	LOG(LOG_DEBUG, "received roger-report; send RR73\n");
+	ft8_tx_3f(rec->callsign, mycall, "RR73");
+}
+
+static void ftx_stage_send_roger_report(ftx_pending_caller* rec, const char* mycall)
+{
+	LOG(LOG_DEBUG, "received report; send roger-report\n");
+	char report[5];
+	snprintf(report, sizeof(report), "R%s", rec->sent);
+	ft8_tx_3f(rec->callsign, mycall, report);
+}
+
+static void ftx_stage_send_signal_report(ftx_pending_caller* rec, const char* mycall)
+{
+	// They've addressed us directly and we know their grid: reply with a report.
+	LOG(LOG_DEBUG, "engaged with known grid: send a signal report\n");
+	ft8_tx_3f(rec->callsign, mycall, rec->has_sent ? rec->sent : field_str("SENT"));
+}
+
+static void ftx_stage_send_our_grid(ftx_pending_caller* rec, const char* mycall)
+{
+	// Not yet engaged (e.g. this is their bare CQ and we're choosing to answer it), or
+	// engaged but nothing substantive received yet: (re)send our own grid.
+	LOG(LOG_DEBUG, "not yet engaged: send our own grid\n");
+	char mygrid[8];
+	strncpy(mygrid, field_str("MYGRID"), sizeof(mygrid));
+	mygrid[4] = 0; // use only the first 4 letters of the grid
+	ft8_tx_3f(rec->callsign, mycall, mygrid);
+	rec->engaged = true;
+}
+
+static void ftx_caller_populate_ui_fields(const ftx_pending_caller* rec)
+{
 	field_set("CALL", rec->callsign);
 	if (rec->has_grid)
 		field_set("EXCH", rec->grid);
@@ -1662,44 +1770,60 @@ static void ftx_caller_act(ftx_pending_caller* rec)
 	strncpy(mygrid, field_str("MYGRID"), sizeof(mygrid));
 	mygrid[4] = 0; // use only the first 4 letters of the grid
 	field_set("NR", mygrid);
-	const char *mycall = field_str("MYCALLSIGN");
+}
+
+// Inverse of ftx_caller_populate_ui_fields(): snapshots the currently-active contact's UI
+// fields into a fresh record, for suspending it to the queue (FTX_CLICK_BEHAVIOR=SWITCH) so
+// its accumulated details aren't lost while a newly-clicked caller is worked instead.
+static ftx_pending_caller ftx_caller_from_ui_fields(const char* callsign)
+{
+	ftx_pending_caller rec = { 0 };
+	strncpy(rec.callsign, callsign, sizeof(rec.callsign) - 1);
+	rec.engaged = true; // it was the active contact, so a direct link necessarily already exists
+	if (field_str("EXCH")[0]) {
+		rec.has_grid = true;
+		strncpy(rec.grid, field_str("EXCH"), sizeof(rec.grid) - 1);
+	}
+	if (field_str("RECV")[0]) {
+		rec.has_recv = true;
+		strncpy(rec.recv, field_str("RECV"), sizeof(rec.recv) - 1);
+	}
+	if (field_str("SENT")[0]) {
+		rec.has_sent = true;
+		strncpy(rec.sent, field_str("SENT"), sizeof(rec.sent) - 1);
+	}
+	return rec;
+}
+
+/*!
+	Given an accumulated record \a rec (freshly merged or resumed from the queue), decide what to
+	transmit/log next. This is what lets us jump straight to sending a report once we already
+	know their grid, or complete and log immediately if their queued messages already reached
+	RR73/73 -- the decision is driven by everything accumulated on \a rec, not just the latest
+	message's flags.
+*/
+static void ftx_caller_act(ftx_pending_caller* rec)
+{
+	// Acting on anyone -- whether it's the caller we were about to give up on (a late reply)
+	// or someone else entirely -- supersedes any pending give-up from ft8_poll()'s grace
+	// period; there's nothing left to discard-after-a-delay once we've moved on ourselves.
+	ftx_giveup_pending = false;
+	tx_off();
+	ftx_caller_populate_ui_fields(rec);
 
 	// If FTX_AUTO == "OFF", the user gets to decide what to do next
 	// and operate the macro buttons manually.
-	if (!strcmp(field_str("FTX_AUTO"), "OFF"))
+	if (ftx_current_auto_mode() == FTX_AUTO_OFF)
 		return;
 
-	if (rec->got_73) {
-		LOG(LOG_DEBUG, "received 73\n");
-		enter_qso();
-		call_wipe();
-		ft8_abort(true);
-		ftx_tx_text[0] = 0;
-		ftx_queue_dequeue_next();
-	} else if (rec->got_rr73) {
-		LOG(LOG_DEBUG, "received RR73, send 73\n");
-		ftx_repeat = 1;
-		ft8_tx_3f(rec->callsign, mycall, "73");
-		enter_qso();
-		// don't call_wipe() yet: wait for the 73 to finish sending
-	} else if (rec->has_recv && rec->recv_is_roger) {
-		LOG(LOG_DEBUG, "received roger-report; send RR73\n");
-		ft8_tx_3f(rec->callsign, mycall, "RR73");
-	} else if (rec->has_recv) {
-		LOG(LOG_DEBUG, "received report; send roger-report\n");
-		char report[5];
-		snprintf(report, sizeof(report), "R%s", rec->sent);
-		ft8_tx_3f(rec->callsign, mycall, report);
-	} else if (rec->engaged && rec->has_grid) {
-		// They've addressed us directly and we know their grid: reply with a report.
-		LOG(LOG_DEBUG, "engaged with known grid: send a signal report\n");
-		ft8_tx_3f(rec->callsign, mycall, rec->has_sent ? rec->sent : field_str("SENT"));
-	} else {
-		// Not yet engaged (e.g. this is their bare CQ and we're choosing to answer it), or
-		// engaged but nothing substantive received yet: (re)send our own grid.
-		LOG(LOG_DEBUG, "not yet engaged: send our own grid\n");
-		ft8_tx_3f(rec->callsign, mycall, mygrid);
-		rec->engaged = true;
+	const char *mycall = field_str("MYCALLSIGN");
+	switch (ftx_caller_stage(rec)) {
+		case FTX_STAGE_73_RECEIVED:     ftx_stage_finish_qso();                  break;
+		case FTX_STAGE_RR73_RECEIVED:   ftx_stage_send_closing_73(rec, mycall);     break;
+		case FTX_STAGE_ROGER_RECEIVED:  ftx_stage_send_rr73(rec, mycall);           break;
+		case FTX_STAGE_REPORT_RECEIVED: ftx_stage_send_roger_report(rec, mycall);   break;
+		case FTX_STAGE_GRID_KNOWN:      ftx_stage_send_signal_report(rec, mycall);  break;
+		case FTX_STAGE_NEW:             ftx_stage_send_our_grid(rec, mycall);       break;
 	}
 }
 
@@ -1722,6 +1846,36 @@ static ftx_pending_caller ftx_queue_take(const char* callsign)
 	ftx_pending_caller fresh = { 0 };
 	strncpy(fresh.callsign, callsign, sizeof(fresh.callsign) - 1);
 	return fresh;
+}
+
+// Policy for ftx_queue_pick() below: which single queue entry ranks first.
+typedef enum { FTX_PICK_OLDEST, FTX_PICK_NEWEST, FTX_PICK_LOWEST_PRI } ftx_pick_policy;
+
+/*!
+	Scans the whole queue for the single entry ranked first by \a policy (OLDEST/NEWEST by seq;
+	LOWEST_PRI by priority, ties broken by seq), skipping any index marked true in the optional
+	\a excluded mask (NULL to consider everything). Returns -1 if nothing qualifies. The one
+	"find the extremal queue entry" search, shared by dequeuing, display-rank lookup, and
+	full-queue eviction, which used to each reimplement this scan slightly differently.
+*/
+static int ftx_queue_pick(ftx_pick_policy policy, const bool* excluded)
+{
+	int best = -1;
+	for (int i = 0; i < ftx_queue_n; i++) {
+		if (excluded && excluded[i])
+			continue;
+		bool better = best < 0;
+		if (!better) switch (policy) {
+			case FTX_PICK_OLDEST:     better = ftx_queue[i].seq < ftx_queue[best].seq; break;
+			case FTX_PICK_NEWEST:     better = ftx_queue[i].seq > ftx_queue[best].seq; break;
+			case FTX_PICK_LOWEST_PRI: better = ftx_queue[i].priority < ftx_queue[best].priority ||
+			                                   (ftx_queue[i].priority == ftx_queue[best].priority &&
+			                                    ftx_queue[i].seq < ftx_queue[best].seq); break;
+		}
+		if (better)
+			best = i;
+	}
+	return best;
 }
 
 /*!
@@ -1750,18 +1904,12 @@ static ftx_pending_caller* ftx_queue_insert(const ftx_pending_caller* seed, bool
 	} else {
 		const char *policy = field_str("FTX_QUEUE_FULL");
 		int victim = -1;
-		if (!strcmp(policy, "DROP_OLDEST") || !strcmp(policy, "DROP_NEWEST")) {
-			for (int i = 0; i < ftx_queue_n; i++)
-				if (victim < 0 ||
-					(!strcmp(policy, "DROP_OLDEST") ? ftx_queue[i].seq < ftx_queue[victim].seq
-					                                : ftx_queue[i].seq > ftx_queue[victim].seq))
-					victim = i;
-		} else if (!strcmp(policy, "DROP_LOWEST_PRI")) {
-			for (int i = 0; i < ftx_queue_n; i++)
-				if (victim < 0 || ftx_queue[i].priority < ftx_queue[victim].priority ||
-					(ftx_queue[i].priority == ftx_queue[victim].priority && ftx_queue[i].seq < ftx_queue[victim].seq))
-					victim = i;
-		}
+		if (!strcmp(policy, "DROP_OLDEST"))
+			victim = ftx_queue_pick(FTX_PICK_OLDEST, NULL);
+		else if (!strcmp(policy, "DROP_NEWEST"))
+			victim = ftx_queue_pick(FTX_PICK_NEWEST, NULL);
+		else if (!strcmp(policy, "DROP_LOWEST_PRI"))
+			victim = ftx_queue_pick(FTX_PICK_LOWEST_PRI, NULL);
 		// REJECT (default), or no candidate found for some reason: drop the new caller instead.
 		if (victim < 0) {
 			LOG(LOG_DEBUG, "FTx queue full: rejecting %s\n", seed->callsign);
@@ -1787,16 +1935,18 @@ void ftx_queue_dequeue_next(void)
 	LOG(LOG_INFO, "   ftx: dequeue_next called, queue count=%d\n", ftx_queue_n);
 	if (ftx_queue_n <= 0)
 		return;
-	int oldest = 0;
-	for (int i = 1; i < ftx_queue_n; i++)
-		if (ftx_queue[i].seq < ftx_queue[oldest].seq)
-			oldest = i;
+	int oldest = ftx_queue_pick(FTX_PICK_OLDEST, NULL);
 	ftx_pending_caller next = ftx_queue[oldest];
 	for (int j = oldest + 1; j < ftx_queue_n; j++)
 		ftx_queue[j - 1] = ftx_queue[j];
 	ftx_queue_n--;
-	LOG(LOG_INFO, "   ftx: dequeue_next acting on '%s', %d left queued\n", next.callsign, ftx_queue_n);
-	ftx_caller_act(&next);
+	if (next.is_cq_item) {
+		LOG(LOG_INFO, "   ftx: dequeue_next sending queued CQ, %d left queued\n", ftx_queue_n);
+		ft8_tx(next.cq_text, field_int("TX_PITCH"));
+	} else {
+		LOG(LOG_INFO, "   ftx: dequeue_next acting on '%s', %d left queued\n", next.callsign, ftx_queue_n);
+		ftx_caller_act(&next);
+	}
 }
 
 // Exposed (non-static) purely so tests can introspect the queue's contents/order without a
@@ -1815,14 +1965,11 @@ static int ftx_queue_index_at_rank(int rank)
 {
 	if (rank < 0 || rank >= ftx_queue_n)
 		return -1;
-	bool used[FTX_QUEUE_CAP] = { 0 };
+	bool excluded[FTX_QUEUE_CAP] = { 0 };
 	int best = -1;
 	for (int pick = 0; pick <= rank; pick++) {
-		best = -1;
-		for (int i = 0; i < ftx_queue_n; i++)
-			if (!used[i] && (best < 0 || ftx_queue[i].seq < ftx_queue[best].seq))
-				best = i;
-		used[best] = true;
+		best = ftx_queue_pick(FTX_PICK_OLDEST, excluded);
+		excluded[best] = true;
 	}
 	return best;
 }
@@ -1830,7 +1977,9 @@ static int ftx_queue_index_at_rank(int rank)
 const char *ftx_queue_callsign_at(int rank)
 {
 	int i = ftx_queue_index_at_rank(rank);
-	return i < 0 ? "" : ftx_queue[i].callsign;
+	if (i < 0)
+		return "";
+	return ftx_queue[i].is_cq_item ? "CQ" : ftx_queue[i].callsign;
 }
 
 /*!
@@ -1866,38 +2015,56 @@ void ftx_queue_clear(void)
 
 	If FTX_AUTO == "OFF", acting on a message only populates fields; see ftx_caller_act().
 */
+// Whatever msg is (someone else's exchange, or their own CQ-response to a third station), if
+// it's not addressed to us then it isn't a continuation of a QSO with us, so none of its
+// RST/report/completion content is actually about us. Discards that content -- but leaves
+// msg->caller alone, so it still flows through the normal qso_in_progress/click-behavior/queue
+// logic, the same as clicking any other station: this used to unconditionally transmit and
+// return, bypassing the queue entirely, which is exactly the "clicking a station immediately
+// hijacks/aborts an in-progress QSO, ignoring FTX_CLICK_BEHAVIOR" bug.
+static void ftx_sanitize_third_party_message(ftx_parsed_message* msg)
+{
+	if (!msg->has_callee || ftx_addressed_to_me(msg))
+		return;
+	msg->has_grid = msg->has_rst = msg->has_snr = false;
+	msg->is_73 = msg->is_rr73 = msg->is_rrr = false;
+	field_set("RECV", ""); // clear any stale received RST; it was for someone else
+}
+
+// Queues an interrupting caller (FTX_CLICK_BEHAVIOR=ENQUEUE) instead of acting on it now.
+static void ftx_route_to_queue(const ftx_parsed_message* msg, const char* line, int line_len,
+	const text_span_semantic* spans)
+{
+	ftx_pending_caller seed = { 0 };
+	strncpy(seed.callsign, msg->caller, sizeof(seed.callsign) - 1);
+	ftx_pending_caller *rec = ftx_queue_insert(&seed, false);
+	if (rec) {
+		ftx_caller_merge(rec, msg);
+		int sem_count = 1;
+		while (sem_count < MAX_CONSOLE_LINE_STYLES && spans[sem_count].length)
+			sem_count++;
+		rec->priority = ftx_priority(line, line_len, spans, sem_count, NULL);
+	}
+}
+
+// Suspends the currently-active contact to the front of the queue (FTX_CLICK_BEHAVIOR=SWITCH),
+// so its accumulated details aren't lost while the newly-clicked caller is worked instead.
+static void ftx_suspend_active_qso(const char* current_call)
+{
+	ftx_pending_caller suspended = ftx_caller_from_ui_fields(current_call);
+	ftx_queue_insert(&suspended, true);
+}
+
 void ftx_call_or_continue(const char* line, int line_len, const text_span_semantic* spans, bool is_click)
 {
 	ftx_parsed_message msg;
 	if (!ftx_parse_message(line, line_len, spans, &msg))
 		return;
 
-	if (msg.has_pitch)
-		field_set("FTX_RX_PITCH", msg.pitch);
-
-	// The callee is not me: whatever this message is (someone else's exchange, or their own
-	// CQ-response to a third station), it isn't a continuation of a QSO with us, so none of
-	// its RST/report/completion content is actually about us. Discard that content -- but
-	// still let msg.caller flow through the normal qso_in_progress / click-behavior / queue
-	// logic below, the same as clicking any other station: this used to unconditionally
-	// transmit and return here, bypassing the queue entirely, which is exactly the "clicking a
-	// station immediately hijacks/aborts an in-progress QSO, ignoring FTX_CLICK_BEHAVIOR" bug.
-	if (msg.has_callee && strcmp(msg.callee, field_str("MYCALLSIGN"))) {
-		msg.has_grid = msg.has_rst = msg.has_snr = false;
-		msg.is_73 = msg.is_rr73 = msg.is_rrr = false;
-		field_set("RECV", ""); // clear any stale received RST; it was for someone else
-	}
+	ftx_sanitize_third_party_message(&msg);
 
 	const char *current_call = field_str("CALL");
-	// A message only counts as a genuine continuation of our active QSO if it's actually
-	// addressed to us -- a bare CQ, or a message they sent to some third station, isn't
-	// evidence of them replying to us, even if the caller happens to match. Without this, the
-	// station we're mid-attempt with (including one we've given up on and are just waiting
-	// out the grace period for) sending an unrelated fresh CQ looked identical to a reply,
-	// silently resurrecting a stale attempt instead of properly timing out and letting the
-	// queue advance.
-	bool direct_to_us = msg.has_callee && !strcmp(msg.callee, field_str("MYCALLSIGN"));
-	bool qso_in_progress = current_call[0] && (strcmp(current_call, msg.caller) || !direct_to_us);
+	bool qso_in_progress = ftx_qso_active() && !ftx_message_continues_active_qso(&msg);
 	// LOG_INFO (not LOG_DEBUG) so this prints alongside the "<<"/"->"/">>" trace lines already
 	// on stderr: this is the exact decision point that determines whether a click queues or
 	// hijacks the active QSO.
@@ -1908,36 +2075,11 @@ void ftx_call_or_continue(const char* line, int line_len, const text_span_semant
 	if (qso_in_progress) {
 		const char *policy = is_click ? field_str("FTX_CLICK_BEHAVIOR") : "ENQUEUE";
 		if (!strcmp(policy, "ENQUEUE")) {
-			ftx_pending_caller seed = { 0 };
-			strncpy(seed.callsign, msg.caller, sizeof(seed.callsign) - 1);
-			ftx_pending_caller *rec = ftx_queue_insert(&seed, false);
-			if (rec) {
-				ftx_caller_merge(rec, &msg);
-				int sem_count = 1;
-				while (sem_count < MAX_CONSOLE_LINE_STYLES && spans[sem_count].length)
-					sem_count++;
-				rec->priority = ftx_priority(line, line_len, spans, sem_count, NULL);
-			}
+			ftx_route_to_queue(&msg, line, line_len, spans);
 			return;
 		}
-		if (!strcmp(policy, "SWITCH")) {
-			ftx_pending_caller suspended = { 0 };
-			strncpy(suspended.callsign, current_call, sizeof(suspended.callsign) - 1);
-			suspended.engaged = true; // it was the active contact, so a direct link necessarily already exists
-			if (field_str("EXCH")[0]) {
-				suspended.has_grid = true;
-				strncpy(suspended.grid, field_str("EXCH"), sizeof(suspended.grid) - 1);
-			}
-			if (field_str("RECV")[0]) {
-				suspended.has_recv = true;
-				strncpy(suspended.recv, field_str("RECV"), sizeof(suspended.recv) - 1);
-			}
-			if (field_str("SENT")[0]) {
-				suspended.has_sent = true;
-				strncpy(suspended.sent, field_str("SENT"), sizeof(suspended.sent) - 1);
-			}
-			ftx_queue_insert(&suspended, true);
-		}
+		if (!strcmp(policy, "SWITCH"))
+			ftx_suspend_active_qso(current_call);
 		// REPLACE (or SWITCH, having just suspended the old one): fall through and act on the new caller now.
 	}
 
@@ -1949,9 +2091,40 @@ void ftx_call_or_continue(const char* line, int line_len, const text_span_semant
 	// our next transmission into the wrong (adjacent) slot instead of the correct alternating one.
 	set_reply_tx1st(msg.time % 100);
 
+	// Same reasoning as set_reply_tx1st() above: only move the panadapter's RX pitch marker for
+	// the caller we're actually acting on now, not for every parsed message (a merely-enqueued
+	// one returned above without reaching here).
+	if (msg.has_pitch)
+		field_set("FTX_RX_PITCH", msg.pitch);
+
 	ftx_pending_caller rec = ftx_queue_take(msg.caller);
 	ftx_caller_merge(&rec, &msg);
 	ftx_caller_act(&rec);
+}
+
+/*!
+	Single entry point for "the operator wants to send this CQ now" (the macro CQ button, or
+	manually typing a CQ into the text-entry field). If idle (no active QSO and nothing already
+	queued), transmits \a cq_text immediately, same as before. Otherwise takes its place in the
+	same queue as waiting callers -- no special-casing, no bypass -- so a CQ pressed while busy
+	isn't lost, rejected, or forced to interrupt; it's simply sent once its turn comes up.
+*/
+void ftx_request_cq(const char* cq_text)
+{
+	if (!ftx_qso_active() && ftx_queue_count() == 0) {
+		char text[64];
+		strncpy(text, cq_text, sizeof(text) - 1);
+		text[sizeof(text) - 1] = 0;
+		ft8_tx(text, field_int("TX_PITCH"));
+		return;
+	}
+	ftx_pending_caller seed = { 0 };
+	seed.is_cq_item = true;
+	ftx_pending_caller *rec = ftx_queue_insert(&seed, false);
+	if (rec) {
+		rec->is_cq_item = true;
+		strncpy(rec->cq_text, cq_text, sizeof(rec->cq_text) - 1);
+	}
 }
 
 void ft8_init(){
