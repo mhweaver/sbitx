@@ -6692,6 +6692,18 @@ void call_wipe()
 	soft_console_init(); // undo any highlighting
 }
 
+// A band or mode change makes anyone queued unreachable (they were heard in the band/mode
+// we're leaving), and just as importantly abandons any QSO attempt in progress: the CALL/EXCH/
+// etc log fields are just as stale, since that contact was also heard in the band/mode we're
+// leaving. Clearing only the queue and not these fields leaves ftx_qso_active() reporting a
+// QSO that no longer exists, which makes the next CQ queue behind (or get lost behind) that
+// phantom instead of transmitting -- call both together everywhere a band/mode change happens.
+static void ftx_abandon_queue_and_qso(void)
+{
+	ftx_queue_clear();
+	call_wipe();
+}
+
 void update_titlebar()
 {
 	char buff[100];
@@ -7775,9 +7787,9 @@ int do_mode_dropdown(struct field *f, cairo_t *gfx, int event, int a, int b, int
 			// Auto-set frequency when switching TO FT4 or FT8
 			set_ftx_frequency(mode_id(f->value));
 
-			// Anyone queued was heard in the mode we're leaving; they're not reachable
-			// (or even still being decoded) in the new one.
-			ftx_queue_clear();
+			// Anyone queued, and any QSO attempt, was heard in the mode we're leaving; not
+			// reachable (or even still being decoded) in the new one.
+			ftx_abandon_queue_and_qso();
 		}
 
 		return result;
@@ -11376,7 +11388,7 @@ void change_band(char *request)
 	set_field("#selband", buff); // signals web app to clear lists
 	q_empty(&q_web);			 // Clear old messages in queue
 	console_init();				 // Clear old FT8 messages
-	ftx_queue_clear();			 // Anyone queued was heard on the band we're leaving
+	ftx_abandon_queue_and_qso(); // anyone queued, and any QSO attempt, was heard on the band we're leaving
 
 	// this fixes bug with filter settings not being applied after a band change, not sure why it's a bug - k3ng 2022-09-03
 	//  set_field("r1:low",get_field("r1:low")->value);
@@ -11946,10 +11958,10 @@ void do_control_action(char *cmd)
 			old_mode[sizeof(old_mode) - 1] = 0;
 			set_radio_mode(request + 5);
 			update_field(get_field("r1:mode"));
-			// Anyone queued was heard in the mode we're leaving; they're not reachable
-			// (or even still being decoded) in the new one.
+			// Anyone queued, and any QSO attempt, was heard in the mode we're leaving; not
+			// reachable (or even still being decoded) in the new one.
 			if (strcmp(old_mode, field_str("MODE")))
-				ftx_queue_clear();
+				ftx_abandon_queue_and_qso();
 		}
 		else
 		{
