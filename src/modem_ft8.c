@@ -2026,7 +2026,11 @@ static void ftx_sanitize_third_party_message(ftx_parsed_message* msg)
 {
 	if (!msg->has_callee || ftx_addressed_to_me(msg))
 		return;
-	msg->has_grid = msg->has_rst = msg->has_snr = false;
+	// Leave has_grid alone: a grid is a fact about the caller, true regardless of who they're
+	// talking to (same reasoning ftx_caller_merge() already applies to a bare CQ's grid) --
+	// only the RST/SNR/completion flags are actually about a QSO with us, so only those get
+	// discarded.
+	msg->has_rst = msg->has_snr = false;
 	msg->is_73 = msg->is_rr73 = msg->is_rrr = false;
 	field_set("RECV", ""); // clear any stale received RST; it was for someone else
 }
